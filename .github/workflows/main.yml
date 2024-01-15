@@ -16,11 +16,14 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Publish
-        uses: home-assistant/builder@master
+      - name: Build supervisor
+        uses: home-assistant/builder@2024.01.0
         with:
           args: |
-            --generic latest \
+            $BUILD_ARGS \
             --amd64 \
             --target /data \
-            --docker-hub xiaoxuhong
+            --cosign \
+            --docker-hub xiaoxuhong \
+            --generic latest
+
