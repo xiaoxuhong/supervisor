@@ -20,6 +20,7 @@ jobs:
         uses: home-assistant/builder@master
         with:
           args: |
+            --generic latest \
             --amd64 \
             --target /data \
             --docker-hub xiaoxuhong
