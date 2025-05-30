@@ -1,11 +1,11 @@
 """Schedule for Supervisor."""
+
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import date, datetime, time, timedelta
 import logging
 from uuid import UUID, uuid4
 
-import async_timeout
 import attr
 
 from ..const import CoreState
@@ -74,7 +74,7 @@ class Scheduler(CoreSysAttributes):
     def _schedule_task(self, task: _Task) -> None:
         """Schedule a task on loop."""
         if isinstance(task.interval, (int, float)):
-            task.next = self.sys_loop.call_later(task.interval, self._run_task, task)
+            task.next = self.sys_call_later(task.interval, self._run_task, task)
         elif isinstance(task.interval, time):
             today = datetime.combine(date.today(), task.interval)
             tomorrow = datetime.combine(date.today() + timedelta(days=1), task.interval)
@@ -85,7 +85,7 @@ class Scheduler(CoreSysAttributes):
             else:
                 calc = tomorrow
 
-            task.next = self.sys_loop.call_at(calc.timestamp(), self._run_task, task)
+            task.next = self.sys_call_at(calc, self._run_task, task)
         else:
             _LOGGER.critical(
                 "Unknown interval %s (type: %s) for scheduler %s",
@@ -113,7 +113,7 @@ class Scheduler(CoreSysAttributes):
 
         # Wait until all are shutdown
         try:
-            async with async_timeout.timeout(timeout):
+            async with asyncio.timeout(timeout):
                 await asyncio.wait(running)
         except TimeoutError:
             _LOGGER.error("Timeout while waiting for jobs shutdown")

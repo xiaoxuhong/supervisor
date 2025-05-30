@@ -1,7 +1,7 @@
 """Test the condition decorators."""
-# pylint: disable=protected-access,import-error
+
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 from unittest.mock import ANY, AsyncMock, Mock, PropertyMock, patch
 from uuid import uuid4
 
@@ -9,7 +9,7 @@ from aiohttp.client_exceptions import ClientError
 import pytest
 import time_machine
 
-from supervisor.const import CoreState
+from supervisor.const import BusEvent, CoreState
 from supervisor.coresys import CoreSys
 from supervisor.exceptions import (
     AudioUpdateError,
@@ -19,13 +19,17 @@ from supervisor.exceptions import (
 )
 from supervisor.host.const import HostFeature
 from supervisor.host.manager import HostManager
-from supervisor.jobs import SupervisorJob
+from supervisor.jobs import JobSchedulerOptions, SupervisorJob
 from supervisor.jobs.const import JobExecutionLimit
 from supervisor.jobs.decorator import Job, JobCondition
 from supervisor.jobs.job_group import JobGroup
+from supervisor.os.manager import OSManager
 from supervisor.plugins.audio import PluginAudio
 from supervisor.resolution.const import UnhealthyReason
+from supervisor.supervisor import Supervisor
 from supervisor.utils.dt import utcnow
+
+from tests.common import reset_last_call
 
 
 async def test_healthy(coresys: CoreSys, caplog: pytest.LogCaptureFixture):
@@ -46,7 +50,7 @@ async def test_healthy(coresys: CoreSys, caplog: pytest.LogCaptureFixture):
     test = TestClass(coresys)
     assert await test.execute()
 
-    coresys.resolution.unhealthy = UnhealthyReason.DOCKER
+    coresys.resolution.add_unhealthy_reason(UnhealthyReason.DOCKER)
     assert not await test.execute()
     assert "blocked from execution, system is not healthy - docker" in caplog.text
 
@@ -71,7 +75,8 @@ async def test_internet(
     system_result: bool | None,
 ):
     """Test the internet decorator."""
-    coresys.core.state = CoreState.RUNNING
+    await coresys.core.set_state(CoreState.RUNNING)
+    reset_last_call(Supervisor.check_connectivity)
 
     class TestClass:
         """Test class."""
@@ -101,10 +106,11 @@ async def test_internet(
     mock_websession = AsyncMock()
     mock_websession.head.side_effect = head_side_effect
     coresys.supervisor.connectivity = None
-    with patch(
-        "supervisor.utils.dbus.DBus.call_dbus", return_value=connectivity
-    ), patch.object(
-        CoreSys, "websession", new=PropertyMock(return_value=mock_websession)
+    with (
+        patch("supervisor.utils.dbus.DBus.call_dbus", return_value=connectivity),
+        patch.object(
+            CoreSys, "websession", new=PropertyMock(return_value=mock_websession)
+        ),
     ):
         assert await test.execute_host() is host_result
         assert await test.execute_system() is system_result
@@ -159,11 +165,11 @@ async def test_haos(coresys: CoreSys):
             return True
 
     test = TestClass(coresys)
-    coresys.os._available = True
-    assert await test.execute()
+    with patch.object(OSManager, "available", new=PropertyMock(return_value=True)):
+        assert await test.execute()
 
-    coresys.os._available = False
-    assert not await test.execute()
+    with patch.object(OSManager, "available", new=PropertyMock(return_value=False)):
+        assert not await test.execute()
 
     coresys.jobs.ignore_conditions = [JobCondition.HAOS]
     assert await test.execute()
@@ -235,10 +241,10 @@ async def test_running(coresys: CoreSys):
 
     test = TestClass(coresys)
 
-    coresys.core.state = CoreState.RUNNING
+    await coresys.core.set_state(CoreState.RUNNING)
     assert await test.execute()
 
-    coresys.core.state = CoreState.FREEZE
+    await coresys.core.set_state(CoreState.FREEZE)
     assert not await test.execute()
 
     coresys.jobs.ignore_conditions = [JobCondition.RUNNING]
@@ -266,10 +272,10 @@ async def test_exception_conditions(coresys: CoreSys):
 
     test = TestClass(coresys)
 
-    coresys.core.state = CoreState.RUNNING
+    await coresys.core.set_state(CoreState.RUNNING)
     assert await test.execute()
 
-    coresys.core.state = CoreState.FREEZE
+    await coresys.core.set_state(CoreState.FREEZE)
     with pytest.raises(HassioError):
         await test.execute()
 
@@ -490,15 +496,25 @@ async def test_plugins_updated(coresys: CoreSys):
             return True
 
     test = TestClass(coresys)
-    assert 0 == len(
-        [plugin.slug for plugin in coresys.plugins.all_plugins if plugin.need_update]
+    assert (
+        len(
+            [
+                plugin.slug
+                for plugin in coresys.plugins.all_plugins
+                if plugin.need_update
+            ]
+        )
+        == 0
     )
     assert await test.execute()
 
-    with patch.object(
-        PluginAudio, "need_update", new=PropertyMock(return_value=True)
-    ), patch.object(
-        PluginAudio, "update", side_effect=[AudioUpdateError, None, AudioUpdateError]
+    with (
+        patch.object(PluginAudio, "need_update", new=PropertyMock(return_value=True)),
+        patch.object(
+            PluginAudio,
+            "update",
+            side_effect=[AudioUpdateError, None, AudioUpdateError],
+        ),
     ):
         assert not await test.execute()
         assert await test.execute()
@@ -935,7 +951,7 @@ async def test_execution_limit_group_throttle_rate_limit(
     assert test2.call == 3
 
 
-async def test_internal_jobs_no_notify(coresys: CoreSys):
+async def test_internal_jobs_no_notify(coresys: CoreSys, ha_ws_client: AsyncMock):
     """Test internal jobs do not send any notifications."""
 
     class TestClass:
@@ -956,17 +972,15 @@ async def test_internal_jobs_no_notify(coresys: CoreSys):
             return True
 
     test1 = TestClass(coresys)
-    client = coresys.homeassistant.websocket._client
-    client.async_send_command.reset_mock()
 
     await test1.execute_internal()
     await asyncio.sleep(0)
-    client.async_send_command.assert_not_called()
+    ha_ws_client.async_send_command.assert_not_called()
 
     await test1.execute_default()
     await asyncio.sleep(0)
-    client.async_send_command.call_count == 2
-    client.async_send_command.assert_called_with(
+    assert ha_ws_client.async_send_command.call_count == 2
+    ha_ws_client.async_send_command.assert_called_with(
         {
             "type": "supervisor/event",
             "data": {
@@ -979,6 +993,8 @@ async def test_internal_jobs_no_notify(coresys: CoreSys):
                     "stage": None,
                     "done": True,
                     "parent_id": None,
+                    "errors": [],
+                    "created": ANY,
                 },
             },
         }
@@ -1095,3 +1111,104 @@ async def test_job_always_removed_on_check_failure(coresys: CoreSys):
     await task
     assert job.done
     assert coresys.jobs.jobs == [job]
+
+
+async def test_job_scheduled_delay(coresys: CoreSys):
+    """Test job that schedules a job to start after delay."""
+
+    class TestClass:
+        """Test class."""
+
+        def __init__(self, coresys: CoreSys) -> None:
+            """Initialize object."""
+            self.coresys = coresys
+
+        @Job(name="test_job_scheduled_delay_job_scheduler")
+        async def job_scheduler(self) -> tuple[SupervisorJob, asyncio.TimerHandle]:
+            """Schedule a job to run after delay."""
+            return self.coresys.jobs.schedule_job(
+                self.job_task, JobSchedulerOptions(delayed_start=0.1)
+            )
+
+        @Job(name="test_job_scheduled_delay_job_task")
+        async def job_task(self) -> None:
+            """Do scheduled work."""
+            self.coresys.jobs.current.stage = "work"
+
+    test = TestClass(coresys)
+
+    job, _ = await test.job_scheduler()
+    started = False
+    ended = False
+
+    async def start_listener(evt_job: SupervisorJob):
+        nonlocal started
+        started = started or evt_job.uuid == job.uuid
+
+    async def end_listener(evt_job: SupervisorJob):
+        nonlocal ended
+        ended = ended or evt_job.uuid == job.uuid
+
+    coresys.bus.register_event(BusEvent.SUPERVISOR_JOB_START, start_listener)
+    coresys.bus.register_event(BusEvent.SUPERVISOR_JOB_END, end_listener)
+
+    await asyncio.sleep(0.2)
+
+    assert started
+    assert ended
+    assert job.done
+    assert job.name == "test_job_scheduled_delay_job_task"
+    assert job.stage == "work"
+    assert job.parent_id is None
+
+
+async def test_job_scheduled_at(coresys: CoreSys):
+    """Test job that schedules a job to start at a specified time."""
+    dt = datetime.now()
+
+    class TestClass:
+        """Test class."""
+
+        def __init__(self, coresys: CoreSys) -> None:
+            """Initialize object."""
+            self.coresys = coresys
+
+        @Job(name="test_job_scheduled_at_job_scheduler")
+        async def job_scheduler(self) -> tuple[SupervisorJob, asyncio.TimerHandle]:
+            """Schedule a job to run at specified time."""
+            return self.coresys.jobs.schedule_job(
+                self.job_task, JobSchedulerOptions(start_at=dt + timedelta(seconds=0.1))
+            )
+
+        @Job(name="test_job_scheduled_at_job_task")
+        async def job_task(self) -> None:
+            """Do scheduled work."""
+            self.coresys.jobs.current.stage = "work"
+
+    test = TestClass(coresys)
+
+    with time_machine.travel(dt):
+        job, _ = await test.job_scheduler()
+
+    started = False
+    ended = False
+
+    async def start_listener(evt_job: SupervisorJob):
+        nonlocal started
+        started = started or evt_job.uuid == job.uuid
+
+    async def end_listener(evt_job: SupervisorJob):
+        nonlocal ended
+        ended = ended or evt_job.uuid == job.uuid
+
+    coresys.bus.register_event(BusEvent.SUPERVISOR_JOB_START, start_listener)
+    coresys.bus.register_event(BusEvent.SUPERVISOR_JOB_END, end_listener)
+
+    await asyncio.sleep(0.2)
+
+    assert started
+    assert ended
+    assert job.done
+    assert job.name == "test_job_scheduled_at_job_task"
+    assert job.stage == "work"
+    assert job.parent_id is None

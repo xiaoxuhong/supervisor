@@ -1,4 +1,5 @@
 """Validate functions."""
+
 import ipaddress
 import re
 
@@ -12,8 +13,10 @@ from .const import (
     ATTR_CHANNEL,
     ATTR_CLI,
     ATTR_CONTENT_TRUST,
+    ATTR_COUNTRY,
     ATTR_DEBUG,
     ATTR_DEBUG_BLOCK,
+    ATTR_DETECT_BLOCKING_IO,
     ATTR_DIAGNOSTICS,
     ATTR_DISPLAYNAME,
     ATTR_DNS,
@@ -161,6 +164,8 @@ SCHEMA_SUPERVISOR_CONFIG = vol.Schema(
         vol.Optional(ATTR_DEBUG, default=False): vol.Boolean(),
         vol.Optional(ATTR_DEBUG_BLOCK, default=False): vol.Boolean(),
         vol.Optional(ATTR_DIAGNOSTICS, default=None): vol.Maybe(vol.Boolean()),
+        vol.Optional(ATTR_DETECT_BLOCKING_IO, default=False): vol.Boolean(),
+        vol.Optional(ATTR_COUNTRY): str,
     },
     extra=vol.REMOVE_EXTRA,
 )

@@ -2,6 +2,7 @@
 
 Code: https://github.com/home-assistant/plugin-dns
 """
+
 import asyncio
 from contextlib import suppress
 import errno
@@ -32,7 +33,7 @@ from ..jobs.const import JobExecutionLimit
 from ..jobs.decorator import Job
 from ..resolution.const import ContextType, IssueType, SuggestionType, UnhealthyReason
 from ..utils.json import write_json_file
-from ..utils.sentry import capture_exception
+from ..utils.sentry import async_capture_exception
 from ..validate import dns_url
 from .base import PluginBase
 from .const import (
@@ -109,6 +110,13 @@ class PluginDns(PluginBase):
         self._data[ATTR_SERVERS] = value
 
     @property
+    def default_image(self) -> str:
+        """Return default image for dns plugin."""
+        if self.sys_updater.image_dns:
+            return self.sys_updater.image_dns
+        return super().default_image
+
+    @property
     def latest_version(self) -> AwesomeVersion | None:
         """Return latest version of CoreDNS."""
         return self.sys_updater.version_dns
@@ -144,49 +152,42 @@ class PluginDns(PluginBase):
         # Initialize CoreDNS Template
         try:
             self.resolv_template = jinja2.Template(
-                RESOLV_TMPL.read_text(encoding="utf-8")
+                await self.sys_run_in_executor(RESOLV_TMPL.read_text, encoding="utf-8")
             )
         except OSError as err:
             if err.errno == errno.EBADMSG:
-                self.sys_resolution.unhealthy = UnhealthyReason.OSERROR_BAD_MESSAGE
+                self.sys_resolution.add_unhealthy_reason(
+                    UnhealthyReason.OSERROR_BAD_MESSAGE
+                )
             _LOGGER.error("Can't read resolve.tmpl: %s", err)
+
         try:
             self.hosts_template = jinja2.Template(
-                HOSTS_TMPL.read_text(encoding="utf-8")
+                await self.sys_run_in_executor(HOSTS_TMPL.read_text, encoding="utf-8")
             )
         except OSError as err:
             if err.errno == errno.EBADMSG:
-                self.sys_resolution.unhealthy = UnhealthyReason.OSERROR_BAD_MESSAGE
+                self.sys_resolution.add_unhealthy_reason(
+                    UnhealthyReason.OSERROR_BAD_MESSAGE
+                )
             _LOGGER.error("Can't read hosts.tmpl: %s", err)
 
         await self._init_hosts()
         await super().load()
 
         # Update supervisor
-        self._write_resolv(HOST_RESOLV)
-        await self.sys_supervisor.check_connectivity()
+        await self._write_resolv(HOST_RESOLV)
+
+        # Reinitializing aiohttp.ClientSession after DNS setup makes sure that
+        # aiodns is using the right DNS servers (see #5857).
+        # At this point it should be fairly safe to replace the session since
+        # we only use the session synchronously during setup and not thorugh the
+        # API which previously caused issues (see #5851).
+        await self.coresys.init_websession()
 
     async def install(self) -> None:
         """Install CoreDNS."""
-        _LOGGER.info("Running setup for CoreDNS plugin")
-        while True:
-            # read homeassistant tag and install it
-            if not self.latest_version:
-                await self.sys_updater.reload()
-
-            if self.latest_version:
-                with suppress(DockerError):
-                    await self.instance.install(
-                        self.latest_version, image=self.sys_updater.image_dns
-                    )
-                    break
-            _LOGGER.warning("Error on install CoreDNS plugin. Retrying in 30sec")
-            await asyncio.sleep(30)
-
-        _LOGGER.info("CoreDNS plugin now installed")
-        self.version = self.instance.version
-        self.image = self.sys_updater.image_dns
-        self.save_data()
+        await super().install()
 
         # Init Hosts
         await self.write_hosts()
@@ -198,42 +199,23 @@ class PluginDns(PluginBase):
     )
     async def update(self, version: AwesomeVersion | None = None) -> None:
         """Update CoreDNS plugin."""
-        version = version or self.latest_version
-        old_image = self.image
-
-        if version == self.version:
-            _LOGGER.warning("Version %s is already installed for CoreDNS", version)
-            return
-
-        # Update
         try:
-            await self.instance.update(version, image=self.sys_updater.image_dns)
+            await super().update(version)
         except DockerError as err:
             raise CoreDNSUpdateError("CoreDNS update failed", _LOGGER.error) from err
 
-        self.version = version
-        self.image = self.sys_updater.image_dns
-        self.save_data()
-
-        # Cleanup
-        with suppress(DockerError):
-            await self.instance.cleanup(old_image=old_image)
-
-        # Start CoreDNS
-        await self.start()
-
     async def restart(self) -> None:
         """Restart CoreDNS plugin."""
-        self._write_config()
+        await self._write_config()
         _LOGGER.info("Restarting CoreDNS plugin")
         try:
             await self.instance.restart()
         except DockerError as err:
-            raise CoreDNSError("Can't start CoreDNS plugin", _LOGGER.error) from err
+            raise CoreDNSError("Can't restart CoreDNS plugin", _LOGGER.error) from err
 
     async def start(self) -> None:
         """Run CoreDNS."""
-        self._write_config()
+        await self._write_config()
 
         # Start Instance
         _LOGGER.info("Starting CoreDNS plugin")
@@ -255,7 +237,7 @@ class PluginDns(PluginBase):
         # Reset manually defined DNS
         self.servers.clear()
         self.fallback = True
-        self.save_data()
+        await self.save_data()
 
         # Resets hosts
         with suppress(OSError):
@@ -302,7 +284,7 @@ class PluginDns(PluginBase):
         else:
             self._loop = False
 
-    def _write_config(self) -> None:
+    async def _write_config(self) -> None:
         """Write CoreDNS config."""
         debug: bool = self.sys_config.logging == LogLevel.DEBUG
         dns_servers: list[str] = []
@@ -326,7 +308,8 @@ class PluginDns(PluginBase):
 
         # Write config to plugin
         try:
-            write_json_file(
+            await self.sys_run_in_executor(
+                write_json_file,
                 self.coredns_config,
                 {
                     "servers": dns_servers,
@@ -370,7 +353,9 @@ class PluginDns(PluginBase):
             )
         except OSError as err:
             if err.errno == errno.EBADMSG:
-                self.sys_resolution.unhealthy = UnhealthyReason.OSERROR_BAD_MESSAGE
+                self.sys_resolution.add_unhealthy_reason(
+                    UnhealthyReason.OSERROR_BAD_MESSAGE
+                )
             raise CoreDNSError(f"Can't update hosts: {err}", _LOGGER.error) from err
 
     async def add_host(
@@ -439,9 +424,9 @@ class PluginDns(PluginBase):
             await self.instance.install(self.version)
         except DockerError as err:
             _LOGGER.error("Repair of CoreDNS failed")
-            capture_exception(err)
+            await async_capture_exception(err)
 
-    def _write_resolv(self, resolv_conf: Path) -> None:
+    async def _write_resolv(self, resolv_conf: Path) -> None:
         """Update/Write resolv.conf file."""
         if not self.resolv_template:
             _LOGGER.warning(
@@ -456,10 +441,12 @@ class PluginDns(PluginBase):
 
         # Write config back to resolv
         try:
-            resolv_conf.write_text(data)
+            await self.sys_run_in_executor(resolv_conf.write_text, data)
         except OSError as err:
             if err.errno == errno.EBADMSG:
-                self.sys_resolution.unhealthy = UnhealthyReason.OSERROR_BAD_MESSAGE
+                self.sys_resolution.add_unhealthy_reason(
+                    UnhealthyReason.OSERROR_BAD_MESSAGE
+                )
             _LOGGER.warning("Can't write/update %s: %s", resolv_conf, err)
             return
 

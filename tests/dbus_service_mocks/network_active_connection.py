@@ -15,9 +15,6 @@ def setup(object_path: str | None = None) -> DBusServiceMock:
     return ActiveConnection(object_path if object_path else DEFAULT_OBJECT_PATH)
 
 
-# pylint: disable=invalid-name
-
-
 @dataclass(slots=True)
 class ActiveConnectionFixture:
     """Active Connection fixture."""
@@ -49,6 +46,12 @@ FIXTURES: dict[str, ActiveConnectionFixture] = {
         devices=[
             "/org/freedesktop/NetworkManager/Devices/4",
             "/org/freedesktop/NetworkManager/Devices/5",
+        ],
+    ),
+    "/org/freedesktop/NetworkManager/ActiveConnection/3": ActiveConnectionFixture(
+        connection="/org/freedesktop/NetworkManager/Settings/3",
+        devices=[
+            "/org/freedesktop/NetworkManager/Devices/3",
         ],
     ),
 }

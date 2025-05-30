@@ -1,4 +1,5 @@
 """Test hostname dbus interface."""
+
 # pylint: disable=import-error
 from dbus_fast import DBusError, Variant
 from dbus_fast.aio.message_bus import MessageBus
@@ -42,7 +43,7 @@ async def test_reboot(systemd_service: SystemdService, dbus_session_bus: Message
     await systemd.connect(dbus_session_bus)
 
     assert await systemd.reboot() is None
-    assert systemd_service.Reboot.calls == [tuple()]
+    assert systemd_service.Reboot.calls == [()]
 
 
 async def test_power_off(systemd_service: SystemdService, dbus_session_bus: MessageBus):
@@ -56,7 +57,7 @@ async def test_power_off(systemd_service: SystemdService, dbus_session_bus: Mess
     await systemd.connect(dbus_session_bus)
 
     assert await systemd.power_off() is None
-    assert systemd_service.PowerOff.calls == [tuple()]
+    assert systemd_service.PowerOff.calls == [()]
 
 
 async def test_start_unit(

@@ -1,4 +1,5 @@
 """Init file for Supervisor Supervisor RESTful API."""
+
 import asyncio
 from collections.abc import Awaitable
 import logging
@@ -16,9 +17,11 @@ from ..const import (
     ATTR_BLK_WRITE,
     ATTR_CHANNEL,
     ATTR_CONTENT_TRUST,
+    ATTR_COUNTRY,
     ATTR_CPU_PERCENT,
     ATTR_DEBUG,
     ATTR_DEBUG_BLOCK,
+    ATTR_DETECT_BLOCKING_IO,
     ATTR_DIAGNOSTICS,
     ATTR_FORCE_SECURITY,
     ATTR_HEALTHY,
@@ -46,10 +49,11 @@ from ..const import (
 from ..coresys import CoreSysAttributes
 from ..exceptions import APIError
 from ..store.validate import repositories
+from ..utils.blockbuster import BlockBusterManager
 from ..utils.sentry import close_sentry, init_sentry
 from ..utils.validate import validate_timezone
 from ..validate import version_tag, wait_boot
-from .const import CONTENT_TYPE_BINARY
+from .const import CONTENT_TYPE_TEXT, DetectBlockingIO
 from .utils import api_process, api_process_raw, api_validate
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -59,7 +63,7 @@ SCHEMA_OPTIONS = vol.Schema(
     {
         vol.Optional(ATTR_CHANNEL): vol.Coerce(UpdateChannel),
         vol.Optional(ATTR_ADDONS_REPOSITORIES): repositories,
-        vol.Optional(ATTR_TIMEZONE): validate_timezone,
+        vol.Optional(ATTR_TIMEZONE): str,
         vol.Optional(ATTR_WAIT_BOOT): wait_boot,
         vol.Optional(ATTR_LOGGING): vol.Coerce(LogLevel),
         vol.Optional(ATTR_DEBUG): vol.Boolean(),
@@ -68,6 +72,8 @@ SCHEMA_OPTIONS = vol.Schema(
         vol.Optional(ATTR_CONTENT_TRUST): vol.Boolean(),
         vol.Optional(ATTR_FORCE_SECURITY): vol.Boolean(),
         vol.Optional(ATTR_AUTO_UPDATE): vol.Boolean(),
+        vol.Optional(ATTR_DETECT_BLOCKING_IO): vol.Coerce(DetectBlockingIO),
+        vol.Optional(ATTR_COUNTRY): str,
     }
 )
 
@@ -100,6 +106,8 @@ class APISupervisor(CoreSysAttributes):
             ATTR_DEBUG_BLOCK: self.sys_config.debug_block,
             ATTR_DIAGNOSTICS: self.sys_config.diagnostics,
             ATTR_AUTO_UPDATE: self.sys_updater.auto_update,
+            ATTR_DETECT_BLOCKING_IO: BlockBusterManager.is_enabled(),
+            ATTR_COUNTRY: self.sys_config.country,
             # Depricated
             ATTR_WAIT_BOOT: self.sys_config.wait_boot,
             ATTR_ADDONS: [
@@ -126,11 +134,20 @@ class APISupervisor(CoreSysAttributes):
         """Set Supervisor options."""
         body = await api_validate(SCHEMA_OPTIONS, request)
 
+        # Timezone must be first as validation is incomplete
+        # If a timezone is present we do that validation after in the executor
+        if (
+            ATTR_TIMEZONE in body
+            and (timezone := body[ATTR_TIMEZONE]) != self.sys_config.timezone
+        ):
+            await self.sys_run_in_executor(validate_timezone, timezone)
+            await self.sys_config.set_timezone(timezone)
+
         if ATTR_CHANNEL in body:
             self.sys_updater.channel = body[ATTR_CHANNEL]
 
-        if ATTR_TIMEZONE in body:
-            self.sys_config.timezone = body[ATTR_TIMEZONE]
+        if ATTR_COUNTRY in body:
+            self.sys_config.country = body[ATTR_COUNTRY]
 
         if ATTR_DEBUG in body:
             self.sys_config.debug = body[ATTR_DEBUG]
@@ -140,7 +157,7 @@ class APISupervisor(CoreSysAttributes):
 
         if ATTR_DIAGNOSTICS in body:
             self.sys_config.diagnostics = body[ATTR_DIAGNOSTICS]
-            self.sys_dbus.agent.diagnostics = body[ATTR_DIAGNOSTICS]
+            await self.sys_dbus.agent.set_diagnostics(body[ATTR_DIAGNOSTICS])
 
             if body[ATTR_DIAGNOSTICS]:
                 init_sentry(self.coresys)
@@ -153,13 +170,24 @@ class APISupervisor(CoreSysAttributes):
         if ATTR_AUTO_UPDATE in body:
             self.sys_updater.auto_update = body[ATTR_AUTO_UPDATE]
 
+        if detect_blocking_io := body.get(ATTR_DETECT_BLOCKING_IO):
+            if detect_blocking_io == DetectBlockingIO.ON_AT_STARTUP:
+                self.sys_config.detect_blocking_io = True
+                detect_blocking_io = DetectBlockingIO.ON
+
+            if detect_blocking_io == DetectBlockingIO.ON:
+                BlockBusterManager.activate()
+            elif detect_blocking_io == DetectBlockingIO.OFF:
+                self.sys_config.detect_blocking_io = False
+                BlockBusterManager.deactivate()
+
         # Deprecated
         if ATTR_WAIT_BOOT in body:
             self.sys_config.wait_boot = body[ATTR_WAIT_BOOT]
 
         # Save changes before processing addons in case of errors
-        self.sys_updater.save_data()
-        self.sys_config.save_data()
+        await self.sys_updater.save_data()
+        await self.sys_config.save_data()
 
         # Remove: 2022.9
         if ATTR_ADDONS_REPOSITORIES in body:
@@ -204,19 +232,12 @@ class APISupervisor(CoreSysAttributes):
         await asyncio.shield(self.sys_supervisor.update(version))
 
     @api_process
-    def reload(self, request: web.Request) -> Awaitable[None]:
+    async def reload(self, request: web.Request) -> None:
         """Reload add-ons, configuration, etc."""
-        return asyncio.shield(
-            asyncio.wait(
-                [
-                    self.sys_create_task(coro)
-                    for coro in [
-                        self.sys_updater.reload(),
-                        self.sys_homeassistant.secrets.reload(),
-                        self.sys_resolution.evaluate.evaluate_system(),
-                    ]
-                ]
-            )
+        await asyncio.gather(
+            asyncio.shield(self.sys_updater.reload()),
+            asyncio.shield(self.sys_homeassistant.secrets.reload()),
+            asyncio.shield(self.sys_resolution.evaluate.evaluate_system()),
         )
 
     @api_process
@@ -229,7 +250,7 @@ class APISupervisor(CoreSysAttributes):
         """Soft restart Supervisor."""
         return asyncio.shield(self.sys_supervisor.restart())
 
-    @api_process_raw(CONTENT_TYPE_BINARY)
+    @api_process_raw(CONTENT_TYPE_TEXT, error_type=CONTENT_TYPE_TEXT)
     def logs(self, request: web.Request) -> Awaitable[bytes]:
         """Return supervisor Docker logs."""
         return self.sys_supervisor.logs()

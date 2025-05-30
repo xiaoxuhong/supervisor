@@ -1,4 +1,5 @@
 """Test that we are reading add-on files correctly."""
+
 import errno
 from pathlib import Path
 from unittest.mock import patch
@@ -24,7 +25,7 @@ async def test_read_addon_files(coresys: CoreSys):
             Path(".circleci/config.yml"),
         ],
     ):
-        addon_list = await coresys.store.data._find_addons(Path("test"), {})
+        addon_list = await coresys.store.data._find_addon_configs(Path("test"), {})
 
         assert len(addon_list) == 1
         assert str(addon_list[0]) == "addon/config.yml"
@@ -37,14 +38,14 @@ async def test_reading_addon_files_error(coresys: CoreSys):
 
     with patch("pathlib.Path.glob", side_effect=(err := OSError())):
         err.errno = errno.EBUSY
-        assert (await coresys.store.data._find_addons(Path("test"), {})) is None
+        assert (await coresys.store.data._find_addon_configs(Path("test"), {})) is None
         assert corrupt_repo in coresys.resolution.issues
         assert reset_repo in coresys.resolution.suggestions
         assert coresys.core.healthy is True
 
         coresys.resolution.dismiss_issue(corrupt_repo)
         err.errno = errno.EBADMSG
-        assert (await coresys.store.data._find_addons(Path("test"), {})) is None
+        assert (await coresys.store.data._find_addon_configs(Path("test"), {})) is None
         assert corrupt_repo in coresys.resolution.issues
         assert reset_repo not in coresys.resolution.suggestions
         assert coresys.core.healthy is False

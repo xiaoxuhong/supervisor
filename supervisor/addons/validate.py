@@ -1,4 +1,5 @@
 """Validate add-ons options schema."""
+
 import logging
 import re
 import secrets
@@ -54,7 +55,7 @@ from ..const import (
     ATTR_KERNEL_MODULES,
     ATTR_LABELS,
     ATTR_LEGACY,
-    ATTR_LOCATON,
+    ATTR_LOCATION,
     ATTR_MACHINE,
     ATTR_MAP,
     ATTR_NAME,
@@ -78,6 +79,8 @@ from ..const import (
     ATTR_STATE,
     ATTR_STDIN,
     ATTR_SYSTEM,
+    ATTR_SYSTEM_MANAGED,
+    ATTR_SYSTEM_MANAGED_CONFIG_ENTRY,
     ATTR_TIMEOUT,
     ATTR_TMPFS,
     ATTR_TRANSLATIONS,
@@ -95,11 +98,11 @@ from ..const import (
     ROLE_ALL,
     ROLE_DEFAULT,
     AddonBoot,
+    AddonBootConfig,
     AddonStage,
     AddonStartup,
     AddonState,
 )
-from ..discovery.validate import valid_discovery_service
 from ..docker.const import Capabilities
 from ..validate import (
     docker_image,
@@ -112,6 +115,7 @@ from ..validate import (
 )
 from .const import (
     ATTR_BACKUP,
+    ATTR_BREAKING_VERSIONS,
     ATTR_CODENOTARY,
     ATTR_PATH,
     ATTR_READ_ONLY,
@@ -186,20 +190,6 @@ def _warn_addon_config(config: dict[str, Any]):
     ):
         _LOGGER.warning(
             "Add-on which only support COLD backups trying to use post/pre commands. Please report this to the maintainer of %s",
-            name,
-        )
-
-    invalid_services: list[str] = []
-    for service in config.get(ATTR_DISCOVERY, []):
-        try:
-            valid_discovery_service(service)
-        except vol.Invalid:
-            invalid_services.append(service)
-
-    if invalid_services:
-        _LOGGER.warning(
-            "Add-on lists the following unknown services for discovery: %s. Please report this to the maintainer of %s",
-            ", ".join(invalid_services),
             name,
         )
 
@@ -332,7 +322,9 @@ _SCHEMA_ADDON_CONFIG = vol.Schema(
         vol.Optional(ATTR_STARTUP, default=AddonStartup.APPLICATION): vol.Coerce(
             AddonStartup
         ),
-        vol.Optional(ATTR_BOOT, default=AddonBoot.AUTO): vol.Coerce(AddonBoot),
+        vol.Optional(ATTR_BOOT, default=AddonBootConfig.AUTO): vol.Coerce(
+            AddonBootConfig
+        ),
         vol.Optional(ATTR_INIT, default=True): vol.Boolean(),
         vol.Optional(ATTR_ADVANCED, default=False): vol.Boolean(),
         vol.Optional(ATTR_STAGE, default=AddonStage.STABLE): vol.Coerce(AddonStage),
@@ -422,6 +414,7 @@ _SCHEMA_ADDON_CONFIG = vol.Schema(
             vol.Coerce(int), vol.Range(min=10, max=300)
         ),
         vol.Optional(ATTR_JOURNALD, default=False): vol.Boolean(),
+        vol.Optional(ATTR_BREAKING_VERSIONS, default=list): [version_tag],
     },
     extra=vol.REMOVE_EXTRA,
 )
@@ -480,6 +473,8 @@ SCHEMA_ADDON_USER = vol.Schema(
         vol.Optional(ATTR_PROTECTED, default=True): vol.Boolean(),
         vol.Optional(ATTR_INGRESS_PANEL, default=False): vol.Boolean(),
         vol.Optional(ATTR_WATCHDOG, default=False): vol.Boolean(),
+        vol.Optional(ATTR_SYSTEM_MANAGED, default=False): vol.Boolean(),
+        vol.Optional(ATTR_SYSTEM_MANAGED_CONFIG_ENTRY, default=None): vol.Maybe(str),
     },
     extra=vol.REMOVE_EXTRA,
 )
@@ -488,7 +483,7 @@ SCHEMA_ADDON_SYSTEM = vol.All(
     _migrate_addon_config(),
     _SCHEMA_ADDON_CONFIG.extend(
         {
-            vol.Required(ATTR_LOCATON): str,
+            vol.Required(ATTR_LOCATION): str,
             vol.Required(ATTR_REPOSITORY): str,
             vol.Required(ATTR_TRANSLATIONS, default=dict): {
                 str: SCHEMA_ADDON_TRANSLATIONS

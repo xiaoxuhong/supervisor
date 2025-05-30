@@ -1,14 +1,16 @@
 """Home Assistant Operating-System DataDisk."""
 
+import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
 import logging
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
 
 from awesomeversion import AwesomeVersion
 
 from ..coresys import CoreSys, CoreSysAttributes
+from ..dbus.const import DBUS_ATTR_ID_LABEL, DBUS_IFACE_BLOCK
 from ..dbus.udisks2.block import UDisks2Block
 from ..dbus.udisks2.const import FormatType
 from ..dbus.udisks2.drive import UDisks2Drive
@@ -22,8 +24,12 @@ from ..exceptions import (
 )
 from ..jobs.const import JobCondition, JobExecutionLimit
 from ..jobs.decorator import Job
-from ..utils.sentry import capture_exception
+from ..resolution.checks.disabled_data_disk import CheckDisabledDataDisk
+from ..resolution.checks.multiple_data_disks import CheckMultipleDataDisks
+from ..utils.sentry import async_capture_exception
 from .const import (
+    FILESYSTEM_LABEL_DATA_DISK,
+    FILESYSTEM_LABEL_DISABLED_DATA_DISK,
     PARTITION_NAME_EXTERNAL_DATA_DISK,
     PARTITION_NAME_OLD_EXTERNAL_DATA_DISK,
 )
@@ -123,9 +129,9 @@ class DataDisk(CoreSysAttributes):
             vendor="",
             model="",
             serial="",
-            id=self.sys_dbus.agent.datadisk.current_device,
+            id=self.sys_dbus.agent.datadisk.current_device.as_posix(),
             size=0,
-            device_path=self.sys_dbus.agent.datadisk.current_device,
+            device_path=self.sys_dbus.agent.datadisk.current_device.as_posix(),
             object_path="",
             device_object_path="",
         )
@@ -157,6 +163,16 @@ class DataDisk(CoreSysAttributes):
 
         return available
 
+    @property
+    def check_multiple_data_disks(self) -> CheckMultipleDataDisks:
+        """Resolution center check for multiple data disks."""
+        return self.sys_resolution.check.get("multiple_data_disks")
+
+    @property
+    def check_disabled_data_disk(self) -> CheckDisabledDataDisk:
+        """Resolution center check for disabled data disk."""
+        return self.sys_resolution.check.get("disabled_data_disk")
+
     def _get_block_devices_for_drive(self, drive: UDisks2Drive) -> list[UDisks2Block]:
         """Get block devices for a drive."""
         return [
@@ -171,6 +187,15 @@ class DataDisk(CoreSysAttributes):
         # Update datadisk details on OS-Agent
         if self.sys_dbus.agent.version >= AwesomeVersion("1.2.0"):
             await self.sys_dbus.agent.datadisk.reload_device()
+
+        # Register for signals on devices added/removed
+        if self.sys_dbus.udisks2.is_connected:
+            self.sys_dbus.udisks2.udisks2_object_manager.dbus.object_manager.on_interfaces_added(
+                self._udisks2_interface_added
+            )
+            self.sys_dbus.udisks2.udisks2_object_manager.dbus.object_manager.on_interfaces_removed(
+                self._udisks2_interface_removed
+            )
 
     @Job(
         name="data_disk_migrate",
@@ -272,6 +297,35 @@ class DataDisk(CoreSysAttributes):
                 _LOGGER.warning,
             ) from err
 
+    @Job(
+        name="data_disk_wipe",
+        conditions=[JobCondition.HAOS, JobCondition.OS_AGENT, JobCondition.HEALTHY],
+        limit=JobExecutionLimit.ONCE,
+        on_condition=HassOSJobError,
+    )
+    async def wipe_disk(self) -> None:
+        """Wipe the current data disk."""
+        _LOGGER.info("Scheduling wipe of data disk on next reboot")
+        try:
+            if not await self.sys_dbus.agent.system.schedule_wipe_device():
+                raise HassOSDataDiskError(
+                    "Can't schedule wipe of data disk, check host logs for details",
+                    _LOGGER.error,
+                )
+        except DBusError as err:
+            raise HassOSDataDiskError(
+                f"Can't schedule wipe of data disk: {err!s}", _LOGGER.error
+            ) from err
+
+        _LOGGER.info("Rebooting the host to finish the wipe")
+        try:
+            await self.sys_host.control.reboot()
+        except (HostError, DBusError) as err:
+            raise HassOSError(
+                f"Can't restart device to finish data disk wipe: {err!s}",
+                _LOGGER.warning,
+            ) from err
+
     async def _format_device_with_single_partition(
         self, new_disk: Disk
     ) -> UDisks2Block:
@@ -283,7 +337,7 @@ class DataDisk(CoreSysAttributes):
         try:
             await block_device.format(FormatType.GPT)
         except DBusError as err:
-            capture_exception(err)
+            await async_capture_exception(err)
             raise HassOSDataDiskError(
                 f"Could not format {new_disk.id}: {err!s}", _LOGGER.error
             ) from err
@@ -300,7 +354,7 @@ class DataDisk(CoreSysAttributes):
                 0, 0, LINUX_DATA_PARTITION_GUID, PARTITION_NAME_EXTERNAL_DATA_DISK
             )
         except DBusError as err:
-            capture_exception(err)
+            await async_capture_exception(err)
             raise HassOSDataDiskError(
                 f"Could not create new data partition: {err!s}", _LOGGER.error
             ) from err
@@ -319,3 +373,54 @@ class DataDisk(CoreSysAttributes):
             "New data partition prepared on device %s", partition_block.device
         )
         return partition_block
+
+    async def _udisks2_interface_added(
+        self, _: str, properties: dict[str, dict[str, Any]]
+    ):
+        """If a data disk is added, trigger the resolution check."""
+        if (
+            DBUS_IFACE_BLOCK not in properties
+            or DBUS_ATTR_ID_LABEL not in properties[DBUS_IFACE_BLOCK]
+        ):
+            return
+
+        if (
+            properties[DBUS_IFACE_BLOCK][DBUS_ATTR_ID_LABEL]
+            == FILESYSTEM_LABEL_DATA_DISK
+        ):
+            check = self.check_multiple_data_disks
+        elif (
+            properties[DBUS_IFACE_BLOCK][DBUS_ATTR_ID_LABEL]
+            == FILESYSTEM_LABEL_DISABLED_DATA_DISK
+        ):
+            check = self.check_disabled_data_disk
+        else:
+            return
+
+        # Delay briefly before running check to allow data updates to occur
+        await asyncio.sleep(0.1)
+        await check()
+
+    async def _udisks2_interface_removed(self, _: str, interfaces: list[str]):
+        """If affected by a data disk issue, re-check on removal of a block device."""
+        if DBUS_IFACE_BLOCK not in interfaces:
+            return
+
+        if any(
+            issue.type == self.check_multiple_data_disks.issue
+            and issue.context == self.check_multiple_data_disks.context
+            for issue in self.sys_resolution.issues
+        ):
+            check = self.check_multiple_data_disks
+        elif any(
+            issue.type == self.check_disabled_data_disk.issue
+            and issue.context == self.check_disabled_data_disk.context
+            for issue in self.sys_resolution.issues
+        ):
+            check = self.check_disabled_data_disk
+        else:
+            return
+
+        # Delay briefly before running check to allow data updates to occur
+        await asyncio.sleep(0.1)
+        await check()

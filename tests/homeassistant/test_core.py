@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from unittest.mock import MagicMock, Mock, PropertyMock, patch
 
 from awesomeversion import AwesomeVersion
-from docker.errors import DockerException, ImageNotFound, NotFound
+from docker.errors import APIError, DockerException, ImageNotFound, NotFound
 import pytest
 from time_machine import travel
 
@@ -15,12 +15,12 @@ from supervisor.docker.interface import DockerInterface
 from supervisor.docker.manager import DockerAPI
 from supervisor.exceptions import (
     AudioUpdateError,
-    CodeNotaryError,
     DockerError,
     HomeAssistantCrashError,
     HomeAssistantError,
     HomeAssistantJobError,
 )
+from supervisor.homeassistant.api import APIState
 from supervisor.homeassistant.core import HomeAssistantCore
 from supervisor.homeassistant.module import HomeAssistant
 from supervisor.updater import Updater
@@ -30,17 +30,24 @@ async def test_update_fails_if_out_of_date(coresys: CoreSys):
     """Test update of Home Assistant fails when supervisor or plugin is out of date."""
     coresys.hardware.disk.get_disk_free_space = lambda x: 5000
 
-    with patch.object(
-        type(coresys.supervisor), "need_update", new=PropertyMock(return_value=True)
-    ), pytest.raises(HomeAssistantJobError):
+    with (
+        patch.object(
+            type(coresys.supervisor), "need_update", new=PropertyMock(return_value=True)
+        ),
+        pytest.raises(HomeAssistantJobError),
+    ):
         await coresys.homeassistant.core.update()
 
-    with patch.object(
-        type(coresys.plugins.audio), "need_update", new=PropertyMock(return_value=True)
-    ), patch.object(
-        type(coresys.plugins.audio), "update", side_effect=AudioUpdateError
-    ), pytest.raises(
-        HomeAssistantJobError
+    with (
+        patch.object(
+            type(coresys.plugins.audio),
+            "need_update",
+            new=PropertyMock(return_value=True),
+        ),
+        patch.object(
+            type(coresys.plugins.audio), "update", side_effect=AudioUpdateError
+        ),
+        pytest.raises(HomeAssistantJobError),
     ):
         await coresys.homeassistant.core.update()
 
@@ -50,18 +57,19 @@ async def test_install_landingpage_docker_error(
 ):
     """Test install landing page fails due to docker error."""
     coresys.security.force = True
-    with patch.object(
-        DockerHomeAssistant, "attach", side_effect=DockerError
-    ), patch.object(
-        Updater, "image_homeassistant", new=PropertyMock(return_value="homeassistant")
-    ), patch.object(
-        DockerInterface, "arch", new=PropertyMock(return_value=CpuArch.AMD64)
-    ), patch(
-        "supervisor.homeassistant.core.asyncio.sleep"
-    ) as sleep, patch(
-        "supervisor.security.module.cas_validate",
-        side_effect=[CodeNotaryError, None],
+    with (
+        patch.object(DockerHomeAssistant, "attach", side_effect=DockerError),
+        patch.object(
+            Updater,
+            "image_homeassistant",
+            new=PropertyMock(return_value="homeassistant"),
+        ),
+        patch.object(
+            DockerInterface, "arch", new=PropertyMock(return_value=CpuArch.AMD64)
+        ),
+        patch("supervisor.homeassistant.core.asyncio.sleep") as sleep,
     ):
+        coresys.docker.images.pull.side_effect = [APIError("fail"), MagicMock()]
         await coresys.homeassistant.core.install_landingpage()
         sleep.assert_awaited_once_with(30)
 
@@ -75,15 +83,18 @@ async def test_install_landingpage_other_error(
     """Test install landing page fails due to other error."""
     coresys.docker.images.pull.side_effect = [(err := OSError()), MagicMock()]
 
-    with patch.object(
-        DockerHomeAssistant, "attach", side_effect=DockerError
-    ), patch.object(
-        Updater, "image_homeassistant", new=PropertyMock(return_value="homeassistant")
-    ), patch.object(
-        DockerInterface, "arch", new=PropertyMock(return_value=CpuArch.AMD64)
-    ), patch(
-        "supervisor.homeassistant.core.asyncio.sleep"
-    ) as sleep:
+    with (
+        patch.object(DockerHomeAssistant, "attach", side_effect=DockerError),
+        patch.object(
+            Updater,
+            "image_homeassistant",
+            new=PropertyMock(return_value="homeassistant"),
+        ),
+        patch.object(
+            DockerInterface, "arch", new=PropertyMock(return_value=CpuArch.AMD64)
+        ),
+        patch("supervisor.homeassistant.core.asyncio.sleep") as sleep,
+    ):
         await coresys.homeassistant.core.install_landingpage()
         sleep.assert_awaited_once_with(30)
 
@@ -96,20 +107,23 @@ async def test_install_docker_error(
 ):
     """Test install fails due to docker error."""
     coresys.security.force = True
-    with patch.object(HomeAssistantCore, "start"), patch.object(
-        DockerHomeAssistant, "cleanup"
-    ), patch.object(
-        Updater, "image_homeassistant", new=PropertyMock(return_value="homeassistant")
-    ), patch.object(
-        Updater, "version_homeassistant", new=PropertyMock(return_value="2022.7.3")
-    ), patch.object(
-        DockerInterface, "arch", new=PropertyMock(return_value=CpuArch.AMD64)
-    ), patch(
-        "supervisor.homeassistant.core.asyncio.sleep"
-    ) as sleep, patch(
-        "supervisor.security.module.cas_validate",
-        side_effect=[CodeNotaryError, None],
+    with (
+        patch.object(HomeAssistantCore, "start"),
+        patch.object(DockerHomeAssistant, "cleanup"),
+        patch.object(
+            Updater,
+            "image_homeassistant",
+            new=PropertyMock(return_value="homeassistant"),
+        ),
+        patch.object(
+            Updater, "version_homeassistant", new=PropertyMock(return_value="2022.7.3")
+        ),
+        patch.object(
+            DockerInterface, "arch", new=PropertyMock(return_value=CpuArch.AMD64)
+        ),
+        patch("supervisor.homeassistant.core.asyncio.sleep") as sleep,
     ):
+        coresys.docker.images.pull.side_effect = [APIError("fail"), MagicMock()]
         await coresys.homeassistant.core.install()
         sleep.assert_awaited_once_with(30)
 
@@ -123,17 +137,22 @@ async def test_install_other_error(
     """Test install fails due to other error."""
     coresys.docker.images.pull.side_effect = [(err := OSError()), MagicMock()]
 
-    with patch.object(HomeAssistantCore, "start"), patch.object(
-        DockerHomeAssistant, "cleanup"
-    ), patch.object(
-        Updater, "image_homeassistant", new=PropertyMock(return_value="homeassistant")
-    ), patch.object(
-        Updater, "version_homeassistant", new=PropertyMock(return_value="2022.7.3")
-    ), patch.object(
-        DockerInterface, "arch", new=PropertyMock(return_value=CpuArch.AMD64)
-    ), patch(
-        "supervisor.homeassistant.core.asyncio.sleep"
-    ) as sleep:
+    with (
+        patch.object(HomeAssistantCore, "start"),
+        patch.object(DockerHomeAssistant, "cleanup"),
+        patch.object(
+            Updater,
+            "image_homeassistant",
+            new=PropertyMock(return_value="homeassistant"),
+        ),
+        patch.object(
+            Updater, "version_homeassistant", new=PropertyMock(return_value="2022.7.3")
+        ),
+        patch.object(
+            DockerInterface, "arch", new=PropertyMock(return_value=CpuArch.AMD64)
+        ),
+        patch("supervisor.homeassistant.core.asyncio.sleep") as sleep,
+    ):
         await coresys.homeassistant.core.install()
         sleep.assert_awaited_once_with(30)
 
@@ -158,13 +177,15 @@ async def test_start(
     else:
         coresys.docker.containers.get.side_effect = NotFound("missing")
 
-    with patch.object(
-        HomeAssistant,
-        "version",
-        new=PropertyMock(return_value=AwesomeVersion("2023.7.0")),
-    ), patch.object(DockerAPI, "run") as run, patch.object(
-        HomeAssistantCore, "_block_till_run"
-    ) as block_till_run:
+    with (
+        patch.object(
+            HomeAssistant,
+            "version",
+            new=PropertyMock(return_value=AwesomeVersion("2023.7.0")),
+        ),
+        patch.object(DockerAPI, "run") as run,
+        patch.object(HomeAssistantCore, "_block_till_run") as block_till_run,
+    ):
         await coresys.homeassistant.core.start()
 
         block_till_run.assert_called_once()
@@ -191,11 +212,14 @@ async def test_start_existing_container(coresys: CoreSys, path_extern):
     coresys.docker.containers.get.return_value.image.id = "123"
     coresys.docker.containers.get.return_value.status = "exited"
 
-    with patch.object(
-        HomeAssistant,
-        "version",
-        new=PropertyMock(return_value=AwesomeVersion("2023.7.0")),
-    ), patch.object(HomeAssistantCore, "_block_till_run") as block_till_run:
+    with (
+        patch.object(
+            HomeAssistant,
+            "version",
+            new=PropertyMock(return_value=AwesomeVersion("2023.7.0")),
+        ),
+        patch.object(HomeAssistantCore, "_block_till_run") as block_till_run,
+    ):
         await coresys.homeassistant.core.start()
         block_till_run.assert_called_once()
 
@@ -280,18 +304,19 @@ async def test_api_check_timeout(
     async def mock_instance_start(*_):
         container.status = "running"
 
-    with patch.object(
-        DockerHomeAssistant, "start", new=mock_instance_start
-    ), patch.object(DockerAPI, "container_is_initialized", return_value=True), travel(
-        datetime(2023, 10, 2, 0, 0, 0), tick=False
-    ) as traveller:
+    with (
+        patch.object(DockerHomeAssistant, "start", new=mock_instance_start),
+        patch.object(DockerAPI, "container_is_initialized", return_value=True),
+        travel(datetime(2023, 10, 2, 0, 0, 0), tick=False) as traveller,
+    ):
 
         async def mock_sleep(*args):
             traveller.shift(timedelta(minutes=1))
 
-        with patch(
-            "supervisor.homeassistant.core.asyncio.sleep", new=mock_sleep
-        ), pytest.raises(HomeAssistantCrashError):
+        with (
+            patch("supervisor.homeassistant.core.asyncio.sleep", new=mock_sleep),
+            pytest.raises(HomeAssistantCrashError),
+        ):
             await coresys.homeassistant.core.start()
 
     assert coresys.homeassistant.api.get_api_state.call_count == 3
@@ -310,11 +335,11 @@ async def test_api_check_success(
     async def mock_instance_start(*_):
         container.status = "running"
 
-    with patch.object(
-        DockerHomeAssistant, "start", new=mock_instance_start
-    ), patch.object(DockerAPI, "container_is_initialized", return_value=True), travel(
-        datetime(2023, 10, 2, 0, 0, 0), tick=False
-    ) as traveller:
+    with (
+        patch.object(DockerHomeAssistant, "start", new=mock_instance_start),
+        patch.object(DockerAPI, "container_is_initialized", return_value=True),
+        travel(datetime(2023, 10, 2, 0, 0, 0), tick=False) as traveller,
+    ):
 
         async def mock_sleep(*args):
             traveller.shift(timedelta(minutes=1))
@@ -324,3 +349,114 @@ async def test_api_check_success(
 
     assert coresys.homeassistant.api.get_api_state.call_count == 1
     assert "Detect a running Home Assistant instance" in caplog.text
+
+
+async def test_api_check_database_migration(
+    coresys: CoreSys, container: MagicMock, caplog: pytest.LogCaptureFixture
+):
+    """Test attempts to contact the API timeout."""
+    calls = []
+
+    def mock_api_state(*args):
+        calls.append(None)
+        if len(calls) > 50:
+            return APIState("RUNNING", False)
+        else:
+            return APIState("NOT_RUNNING", True)
+
+    container.status = "stopped"
+    coresys.homeassistant.version = AwesomeVersion("2023.9.0")
+    coresys.homeassistant.api.get_api_state.side_effect = mock_api_state
+
+    async def mock_instance_start(*_):
+        container.status = "running"
+
+    with (
+        patch.object(DockerHomeAssistant, "start", new=mock_instance_start),
+        patch.object(DockerAPI, "container_is_initialized", return_value=True),
+        travel(datetime(2023, 10, 2, 0, 0, 0), tick=False) as traveller,
+    ):
+
+        async def mock_sleep(*args):
+            traveller.shift(timedelta(minutes=1))
+
+        with patch("supervisor.homeassistant.core.asyncio.sleep", new=mock_sleep):
+            await coresys.homeassistant.core.start()
+
+    assert coresys.homeassistant.api.get_api_state.call_count == 51
+    assert "Detect a running Home Assistant instance" in caplog.text
+
+
+async def test_core_loads_wrong_image_for_machine(
+    coresys: CoreSys, container: MagicMock
+):
+    """Test core is loaded with wrong image for machine."""
+    coresys.homeassistant.set_image("ghcr.io/home-assistant/odroid-n2-homeassistant")
+    coresys.homeassistant.version = AwesomeVersion("2024.4.0")
+    container.attrs["Config"] = {"Labels": {"io.hass.version": "2024.4.0"}}
+
+    await coresys.homeassistant.core.load()
+
+    container.remove.assert_called_once_with(force=True)
+    assert coresys.docker.images.remove.call_args_list[0].kwargs == {
+        "image": "ghcr.io/home-assistant/odroid-n2-homeassistant:latest",
+        "force": True,
+    }
+    assert coresys.docker.images.remove.call_args_list[1].kwargs == {
+        "image": "ghcr.io/home-assistant/odroid-n2-homeassistant:2024.4.0",
+        "force": True,
+    }
+    coresys.docker.images.pull.assert_called_once_with(
+        "ghcr.io/home-assistant/qemux86-64-homeassistant:2024.4.0",
+        platform="linux/amd64",
+    )
+    assert (
+        coresys.homeassistant.image == "ghcr.io/home-assistant/qemux86-64-homeassistant"
+    )
+
+
+async def test_core_load_allows_image_override(coresys: CoreSys, container: MagicMock):
+    """Test core does not change image if user overrode it."""
+    coresys.homeassistant.set_image("ghcr.io/home-assistant/odroid-n2-homeassistant")
+    coresys.homeassistant.version = AwesomeVersion("2024.4.0")
+    container.attrs["Config"] = {"Labels": {"io.hass.version": "2024.4.0"}}
+
+    coresys.homeassistant.override_image = True
+    await coresys.homeassistant.core.load()
+
+    container.remove.assert_not_called()
+    coresys.docker.images.remove.assert_not_called()
+    coresys.docker.images.pull.assert_not_called()
+    assert (
+        coresys.homeassistant.image == "ghcr.io/home-assistant/odroid-n2-homeassistant"
+    )
+
+
+async def test_core_loads_wrong_image_for_architecture(
+    coresys: CoreSys, container: MagicMock
+):
+    """Test core is loaded with wrong image for architecture."""
+    coresys.homeassistant.version = AwesomeVersion("2024.4.0")
+    container.attrs["Config"] = {"Labels": {"io.hass.version": "2024.4.0"}}
+    coresys.docker.images.get("ghcr.io/home-assistant/qemux86-64-homeassistant").attrs[
+        "Architecture"
+    ] = "arm64"
+
+    await coresys.homeassistant.core.load()
+
+    container.remove.assert_called_once_with(force=True)
+    assert coresys.docker.images.remove.call_args_list[0].kwargs == {
+        "image": "ghcr.io/home-assistant/qemux86-64-homeassistant:latest",
+        "force": True,
+    }
+    assert coresys.docker.images.remove.call_args_list[1].kwargs == {
+        "image": "ghcr.io/home-assistant/qemux86-64-homeassistant:2024.4.0",
+        "force": True,
+    }
+    coresys.docker.images.pull.assert_called_once_with(
+        "ghcr.io/home-assistant/qemux86-64-homeassistant:2024.4.0",
+        platform="linux/amd64",
+    )
+    assert (
+        coresys.homeassistant.image == "ghcr.io/home-assistant/qemux86-64-homeassistant"
+    )

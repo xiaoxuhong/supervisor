@@ -1,20 +1,25 @@
 """Supervisor job manager."""
-from collections.abc import Callable
+
+import asyncio
+from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from contextvars import Context, ContextVar, Token
+from dataclasses import dataclass
+from datetime import datetime
 import logging
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from attrs import Attribute, define, field
 from attrs.setters import convert as attr_convert, frozen, validate as attr_validate
 from attrs.validators import ge, le
 
+from ..const import BusEvent
 from ..coresys import CoreSys, CoreSysAttributes
-from ..exceptions import JobNotFound, JobStartException
+from ..exceptions import HassioError, JobNotFound, JobStartException
 from ..homeassistant.const import WSEvent
 from ..utils.common import FileConfiguration
-from ..utils.sentry import capture_exception
+from ..utils.dt import utcnow
 from .const import ATTR_IGNORE_CONDITIONS, FILE_CONFIG_JOBS, JobCondition
 from .validate import SCHEMA_JOBS_CONFIG
 
@@ -22,9 +27,17 @@ from .validate import SCHEMA_JOBS_CONFIG
 # When a new asyncio task is started the current context is copied over.
 # Modifications to it in one task are not visible to others though.
 # This allows us to track what job is currently in progress in each task.
-_CURRENT_JOB: ContextVar[UUID] = ContextVar("current_job")
+_CURRENT_JOB: ContextVar[str] = ContextVar("current_job")
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
+
+
+@dataclass
+class JobSchedulerOptions:
+    """Options for scheduling a job."""
+
+    start_at: datetime | None = None
+    delayed_start: float = 0  # Ignored if start_at is set
 
 
 def _remove_current_job(context: Context) -> Context:
@@ -48,11 +61,36 @@ def _on_change(instance: "SupervisorJob", attribute: Attribute, value: Any) -> A
     return value
 
 
+def _invalid_if_started(instance: "SupervisorJob", *_) -> None:
+    """Validate that job has not been started."""
+    if instance.done is not None:
+        raise ValueError("Field cannot be updated once job has started")
+
+
 @define
+class SupervisorJobError:
+    """Representation of an error occurring during a supervisor job."""
+
+    type_: type[HassioError] = HassioError
+    message: str = "Unknown error, see supervisor logs"
+    stage: str | None = None
+
+    def as_dict(self) -> dict[str, str]:
+        """Return dictionary representation."""
+        return {
+            "type": self.type_.__name__,
+            "message": self.message,
+            "stage": self.stage,
+        }
+
+
+@define(order=True)
 class SupervisorJob:
     """Representation of a job running in supervisor."""
 
-    name: str = field(on_setattr=frozen)
+    created: datetime = field(init=False, factory=utcnow, on_setattr=frozen)
+    uuid: str = field(init=False, factory=lambda: uuid4().hex, on_setattr=frozen)
+    name: str | None = field(default=None, validator=[_invalid_if_started])
     reference: str | None = field(default=None, on_setattr=_on_change)
     progress: float = field(
         default=0,
@@ -63,15 +101,18 @@ class SupervisorJob:
     stage: str | None = field(
         default=None, validator=[_invalid_if_done], on_setattr=_on_change
     )
-    uuid: UUID = field(init=False, factory=lambda: uuid4().hex, on_setattr=frozen)
-    parent_id: UUID | None = field(
-        init=False, factory=lambda: _CURRENT_JOB.get(None), on_setattr=frozen
+    parent_id: str | None = field(
+        factory=lambda: _CURRENT_JOB.get(None), on_setattr=frozen
     )
     done: bool | None = field(init=False, default=None, on_setattr=_on_change)
     on_change: Callable[["SupervisorJob", Attribute, Any], None] | None = field(
         default=None, on_setattr=frozen
     )
-    internal: bool = field(default=False, on_setattr=frozen)
+    internal: bool = field(default=False)
+    errors: list[SupervisorJobError] = field(
+        init=False, factory=list, on_setattr=_on_change
+    )
+    release_event: asyncio.Event | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Return dictionary representation."""
@@ -83,7 +124,17 @@ class SupervisorJob:
             "stage": self.stage,
             "done": self.done,
             "parent_id": self.parent_id,
+            "errors": [err.as_dict() for err in self.errors],
+            "created": self.created.isoformat(),
         }
+
+    def capture_error(self, err: HassioError | None = None) -> None:
+        """Capture an error or record that an unknown error has occurred."""
+        if err:
+            new_error = SupervisorJobError(type(err), str(err), self.stage)
+        else:
+            new_error = SupervisorJobError(stage=self.stage)
+        self.errors += [new_error]
 
     @contextmanager
     def start(self):
@@ -99,7 +150,7 @@ class SupervisorJob:
             raise JobStartException("Job has a different parent from current job")
 
         self.done = False
-        token: Token[UUID] | None = None
+        token: Token[str] | None = None
         try:
             token = _CURRENT_JOB.set(self.uuid)
             yield self
@@ -144,9 +195,10 @@ class JobManager(FileConfiguration, CoreSysAttributes):
         """
         try:
             return self.get_job(_CURRENT_JOB.get())
-        except (LookupError, JobNotFound) as err:
-            capture_exception(err)
-            raise RuntimeError("No job for the current asyncio task!") from None
+        except (LookupError, JobNotFound):
+            raise RuntimeError(
+                "No job for the current asyncio task!", _LOGGER.critical
+            ) from None
 
     @property
     def is_job(self) -> bool:
@@ -156,17 +208,27 @@ class JobManager(FileConfiguration, CoreSysAttributes):
     def _notify_on_job_change(
         self, job: SupervisorJob, attribute: Attribute, value: Any
     ) -> None:
-        """Notify Home Assistant of a change to a job."""
+        """Notify Home Assistant of a change to a job and bus on job start/end."""
+        if attribute.name == "errors":
+            value = [err.as_dict() for err in value]
+
         self.sys_homeassistant.websocket.supervisor_event(
-            WSEvent.JOB, job.as_dict() | {attribute.alias: value}
+            WSEvent.JOB, job.as_dict() | {attribute.name: value}
         )
+
+        if attribute.name == "done":
+            if value is False:
+                self.sys_bus.fire_event(BusEvent.SUPERVISOR_JOB_START, job)
+            if value is True:
+                self.sys_bus.fire_event(BusEvent.SUPERVISOR_JOB_END, job)
 
     def new_job(
         self,
-        name: str,
+        name: str | None = None,
         reference: str | None = None,
         initial_stage: str | None = None,
         internal: bool = False,
+        no_parent: bool = False,
     ) -> SupervisorJob:
         """Create a new job."""
         job = SupervisorJob(
@@ -175,11 +237,12 @@ class JobManager(FileConfiguration, CoreSysAttributes):
             stage=initial_stage,
             on_change=None if internal else self._notify_on_job_change,
             internal=internal,
+            **({"parent_id": None} if no_parent else {}),
         )
         self._jobs[job.uuid] = job
         return job
 
-    def get_job(self, uuid: UUID) -> SupervisorJob:
+    def get_job(self, uuid: str) -> SupervisorJob:
         """Return a job by uuid. Raises if it does not exist."""
         if uuid not in self._jobs:
             raise JobNotFound(f"No job found with id {uuid}")
@@ -194,3 +257,30 @@ class JobManager(FileConfiguration, CoreSysAttributes):
             _LOGGER.warning("Removing incomplete job %s from job manager", job.name)
 
         del self._jobs[job.uuid]
+
+        # Clean up any completed sub jobs of this one
+        for sub_job in self.jobs:
+            if sub_job.parent_id == job.uuid and job.done:
+                self.remove_job(sub_job)
+
+    def schedule_job(
+        self,
+        job_method: Callable[..., Awaitable[Any]],
+        options: JobSchedulerOptions,
+        *args,
+        **kwargs,
+    ) -> tuple[SupervisorJob, asyncio.Task | asyncio.TimerHandle]:
+        """Schedule a job to run later and return job and task or timer handle."""
+        job = self.new_job(no_parent=True)
+
+        def _wrap_task() -> asyncio.Task:
+            return self.sys_create_task(
+                job_method(*args, _job__use_existing=job, **kwargs)
+            )
+
+        if options.start_at:
+            return (job, self.sys_call_at(options.start_at, _wrap_task))
+        if options.delayed_start:
+            return (job, self.sys_call_later(options.delayed_start, _wrap_task))
+
+        return (job, _wrap_task())

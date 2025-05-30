@@ -1,6 +1,6 @@
 """Interface to UDisks2 Drive over D-Bus."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from dbus_fast.aio import MessageBus
 
@@ -37,7 +37,7 @@ class UDisks2Drive(DBusInterfaceProxy):
 
     def __init__(self, object_path: str) -> None:
         """Initialize object."""
-        self.object_path = object_path
+        self._object_path = object_path
         super().__init__()
 
     @staticmethod
@@ -46,6 +46,11 @@ class UDisks2Drive(DBusInterfaceProxy):
         obj = UDisks2Drive(object_path)
         await obj.connect(bus)
         return obj
+
+    @property
+    def object_path(self) -> str:
+        """Object path for dbus object."""
+        return self._object_path
 
     @property
     @dbus_property
@@ -95,7 +100,7 @@ class UDisks2Drive(DBusInterfaceProxy):
         """Return time drive first detected."""
         return datetime.fromtimestamp(
             self.properties[DBUS_ATTR_TIME_DETECTED] * 10**-6
-        ).astimezone(timezone.utc)
+        ).astimezone(UTC)
 
     @property
     @dbus_property
@@ -124,4 +129,4 @@ class UDisks2Drive(DBusInterfaceProxy):
     @dbus_connected
     async def eject(self) -> None:
         """Eject media from drive."""
-        await self.dbus.Drive.call_eject(UDISKS2_DEFAULT_OPTIONS)
+        await self.connected_dbus.Drive.call("eject", UDISKS2_DEFAULT_OPTIONS)

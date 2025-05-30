@@ -1,4 +1,5 @@
 """Constants for DBUS."""
+
 from enum import IntEnum, StrEnum
 from socket import AF_INET, AF_INET6
 
@@ -24,6 +25,7 @@ DBUS_IFACE_HAOS = "io.hass.os"
 DBUS_IFACE_HAOS_APPARMOR = "io.hass.os.AppArmor"
 DBUS_IFACE_HAOS_BOARDS = "io.hass.os.Boards"
 DBUS_IFACE_HAOS_CGROUP = "io.hass.os.CGroup"
+DBUS_IFACE_HAOS_CONFIG_SWAP = "io.hass.os.Config.Swap"
 DBUS_IFACE_HAOS_DATADISK = "io.hass.os.DataDisk"
 DBUS_IFACE_HAOS_SYSTEM = "io.hass.os.System"
 DBUS_IFACE_HOSTNAME = "org.freedesktop.hostname1"
@@ -36,12 +38,14 @@ DBUS_IFACE_RAUC_INSTALLER = "de.pengutronix.rauc.Installer"
 DBUS_IFACE_RESOLVED_MANAGER = "org.freedesktop.resolve1.Manager"
 DBUS_IFACE_SETTINGS_CONNECTION = "org.freedesktop.NetworkManager.Settings.Connection"
 DBUS_IFACE_SYSTEMD_MANAGER = "org.freedesktop.systemd1.Manager"
+DBUS_IFACE_SYSTEMD_UNIT = "org.freedesktop.systemd1.Unit"
 DBUS_IFACE_TIMEDATE = "org.freedesktop.timedate1"
 DBUS_IFACE_UDISKS2_MANAGER = "org.freedesktop.UDisks2.Manager"
 
 DBUS_SIGNAL_NM_CONNECTION_ACTIVE_CHANGED = (
     "org.freedesktop.NetworkManager.Connection.Active.StateChanged"
 )
+DBUS_SIGNAL_PROPERTIES_CHANGED = "org.freedesktop.DBus.Properties.PropertiesChanged"
 DBUS_SIGNAL_RAUC_INSTALLER_COMPLETED = "de.pengutronix.rauc.Installer.Completed"
 
 DBUS_OBJECT_BASE = "/"
@@ -50,6 +54,7 @@ DBUS_OBJECT_HAOS = "/io/hass/os"
 DBUS_OBJECT_HAOS_APPARMOR = "/io/hass/os/AppArmor"
 DBUS_OBJECT_HAOS_BOARDS = "/io/hass/os/Boards"
 DBUS_OBJECT_HAOS_CGROUP = "/io/hass/os/CGroup"
+DBUS_OBJECT_HAOS_CONFIG_SWAP = "/io/hass/os/Config/Swap"
 DBUS_OBJECT_HAOS_DATADISK = "/io/hass/os/DataDisk"
 DBUS_OBJECT_HAOS_SYSTEM = "/io/hass/os/System"
 DBUS_OBJECT_HOSTNAME = "/org/freedesktop/hostname1"
@@ -59,11 +64,13 @@ DBUS_OBJECT_RESOLVED = "/org/freedesktop/resolve1"
 DBUS_OBJECT_SETTINGS = "/org/freedesktop/NetworkManager/Settings"
 DBUS_OBJECT_SYSTEMD = "/org/freedesktop/systemd1"
 DBUS_OBJECT_TIMEDATE = "/org/freedesktop/timedate1"
-DBUS_OBJECT_UDISKS2 = "/org/freedesktop/UDisks2/Manager"
+DBUS_OBJECT_UDISKS2 = "/org/freedesktop/UDisks2"
+DBUS_OBJECT_UDISKS2_MANAGER = "/org/freedesktop/UDisks2/Manager"
 
 DBUS_ATTR_ACTIVE_ACCESSPOINT = "ActiveAccessPoint"
 DBUS_ATTR_ACTIVE_CONNECTION = "ActiveConnection"
 DBUS_ATTR_ACTIVE_CONNECTIONS = "ActiveConnections"
+DBUS_ATTR_ACTIVE_STATE = "ActiveState"
 DBUS_ATTR_ACTIVITY_LED = "ActivityLED"
 DBUS_ATTR_ADDRESS_DATA = "AddressData"
 DBUS_ATTR_BITRATE = "Bitrate"
@@ -164,6 +171,8 @@ DBUS_ATTR_STATIC_OPERATING_SYSTEM_CPE_NAME = "OperatingSystemCPEName"
 DBUS_ATTR_STRENGTH = "Strength"
 DBUS_ATTR_SUPPORTED_FILESYSTEMS = "SupportedFilesystems"
 DBUS_ATTR_SYMLINKS = "Symlinks"
+DBUS_ATTR_SWAP_SIZE = "SwapSize"
+DBUS_ATTR_SWAPPINESS = "Swappiness"
 DBUS_ATTR_TABLE = "Table"
 DBUS_ATTR_TIME_DETECTED = "TimeDetected"
 DBUS_ATTR_TIMEUSEC = "TimeUSec"
@@ -177,6 +186,7 @@ DBUS_ATTR_UUID = "Uuid"
 DBUS_ATTR_VARIANT = "Variant"
 DBUS_ATTR_VENDOR = "Vendor"
 DBUS_ATTR_VERSION = "Version"
+DBUS_ATTR_VIRTUALIZATION = "Virtualization"
 DBUS_ATTR_WHAT = "What"
 DBUS_ATTR_WWN = "WWN"
 
@@ -198,6 +208,24 @@ class InterfaceMethod(StrEnum):
     MANUAL = "manual"
     DISABLED = "disabled"
     LINK_LOCAL = "link-local"
+
+
+class InterfaceAddrGenMode(IntEnum):
+    """Interface addr_gen_mode."""
+
+    EUI64 = 0
+    STABLE_PRIVACY = 1
+    DEFAULT_OR_EUI64 = 2
+    DEFAULT = 3
+
+
+class InterfaceIp6Privacy(IntEnum):
+    """Interface ip6_privacy."""
+
+    DEFAULT = -1
+    DISABLED = 0
+    ENABLED_PREFER_PUBLIC = 1
+    ENABLED = 2
 
 
 class ConnectionType(StrEnum):

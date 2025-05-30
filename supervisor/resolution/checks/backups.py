@@ -1,4 +1,5 @@
 """Helpers to check if backed up."""
+
 from ...backups.const import BackupType
 from ...const import CoreState
 from ...coresys import CoreSys
@@ -25,12 +26,15 @@ class CheckBackups(CheckBase):
 
     async def approve_check(self, reference: str | None = None) -> bool:
         """Approve check if it is affected by issue."""
-        return 0 == len(
-            [
-                backup
-                for backup in self.sys_backups.list_backups
-                if backup.sys_type == BackupType.FULL and backup.is_current
-            ]
+        return (
+            len(
+                [
+                    backup
+                    for backup in self.sys_backups.list_backups
+                    if backup.sys_type == BackupType.FULL and backup.is_current
+                ]
+            )
+            == 0
         )
 
     @property

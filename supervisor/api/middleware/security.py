@@ -1,12 +1,16 @@
 """Handle security part of this API."""
+
+from collections.abc import Callable
 import logging
 import re
 from typing import Final
 from urllib.parse import unquote
 
-from aiohttp.web import Request, RequestHandler, Response, middleware
+from aiohttp.web import Request, Response, middleware
 from aiohttp.web_exceptions import HTTPBadRequest, HTTPForbidden, HTTPUnauthorized
 from awesomeversion import AwesomeVersion
+
+from supervisor.homeassistant.const import LANDINGPAGE
 
 from ...addons.const import RE_SLUG
 from ...const import (
@@ -16,11 +20,11 @@ from ...const import (
     ROLE_DEFAULT,
     ROLE_HOMEASSISTANT,
     ROLE_MANAGER,
-    CoreState,
+    VALID_API_STATES,
 )
 from ...coresys import CoreSys, CoreSysAttributes
 from ...utils import version_is_new_enough
-from ..utils import api_return_error, excract_supervisor_token
+from ..utils import api_return_error, extract_supervisor_token
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 _CORE_VERSION: Final = AwesomeVersion("2023.3.4")
@@ -77,6 +81,13 @@ ADDONS_API_BYPASS: Final = re.compile(
     r")$"
 )
 
+# Home Assistant only
+CORE_ONLY_PATHS: Final = re.compile(
+    r"^(?:"
+    r"/addons/" + RE_SLUG + "/sys_options"
+    r")$"
+)
+
 # Policy role add-on API access
 ADDONS_ROLE_ACCESS: dict[str, re.Pattern] = {
     ROLE_DEFAULT: re.compile(
@@ -103,6 +114,8 @@ ADDONS_ROLE_ACCESS: dict[str, re.Pattern] = {
         r"|/addons(?:/" + RE_SLUG + r"/(?!security).+|/reload)?"
         r"|/audio/.+"
         r"|/auth/cache"
+        r"|/available_updates"
+        r"|/backups.*"
         r"|/cli/.+"
         r"|/core/.+"
         r"|/dns/.+"
@@ -112,16 +125,17 @@ ADDONS_ROLE_ACCESS: dict[str, re.Pattern] = {
         r"|/hassos/.+"
         r"|/homeassistant/.+"
         r"|/host/.+"
+        r"|/mounts.*"
         r"|/multicast/.+"
         r"|/network/.+"
         r"|/observer/.+"
-        r"|/os/.+"
+        r"|/os/(?!datadisk/wipe).+"
+        r"|/refresh_updates"
         r"|/resolution/.+"
-        r"|/backups.*"
+        r"|/security/.+"
         r"|/snapshots.*"
         r"|/store.*"
         r"|/supervisor/.+"
-        r"|/security/.+"
         r")$"
     ),
     ROLE_ADMIN: re.compile(
@@ -166,9 +180,7 @@ class SecurityMiddleware(CoreSysAttributes):
         return unquoted
 
     @middleware
-    async def block_bad_requests(
-        self, request: Request, handler: RequestHandler
-    ) -> Response:
+    async def block_bad_requests(self, request: Request, handler: Callable) -> Response:
         """Process request and tblock commonly known exploit attempts."""
         if FILTERS.search(self._recursive_unquote(request.path)):
             _LOGGER.warning(
@@ -186,15 +198,9 @@ class SecurityMiddleware(CoreSysAttributes):
         return await handler(request)
 
     @middleware
-    async def system_validation(
-        self, request: Request, handler: RequestHandler
-    ) -> Response:
+    async def system_validation(self, request: Request, handler: Callable) -> Response:
         """Check if core is ready to response."""
-        if self.sys_core.state not in (
-            CoreState.STARTUP,
-            CoreState.RUNNING,
-            CoreState.FREEZE,
-        ):
+        if self.sys_core.state not in VALID_API_STATES:
             return api_return_error(
                 message=f"System is not ready with state: {self.sys_core.state}"
             )
@@ -202,12 +208,10 @@ class SecurityMiddleware(CoreSysAttributes):
         return await handler(request)
 
     @middleware
-    async def token_validation(
-        self, request: Request, handler: RequestHandler
-    ) -> Response:
+    async def token_validation(self, request: Request, handler: Callable) -> Response:
         """Check security access of this layer."""
-        request_from = None
-        supervisor_token = excract_supervisor_token(request)
+        request_from: CoreSysAttributes | None = None
+        supervisor_token = extract_supervisor_token(request)
 
         # Blacklist
         if BLACKLIST.match(request.path):
@@ -229,6 +233,9 @@ class SecurityMiddleware(CoreSysAttributes):
         if supervisor_token == self.sys_homeassistant.supervisor_token:
             _LOGGER.debug("%s access from Home Assistant", request.path)
             request_from = self.sys_homeassistant
+        elif CORE_ONLY_PATHS.match(request.path):
+            _LOGGER.warning("Attempted access to %s from client besides Home Assistant")
+            raise HTTPForbidden()
 
         # Host
         if supervisor_token == self.sys_plugins.cli.supervisor_token:
@@ -272,10 +279,12 @@ class SecurityMiddleware(CoreSysAttributes):
         raise HTTPForbidden()
 
     @middleware
-    async def core_proxy(self, request: Request, handler: RequestHandler) -> Response:
+    async def core_proxy(self, request: Request, handler: Callable) -> Response:
         """Validate user from Core API proxy."""
-        if request[REQUEST_FROM] != self.sys_homeassistant or version_is_new_enough(
-            self.sys_homeassistant.version, _CORE_VERSION
+        if (
+            request[REQUEST_FROM] != self.sys_homeassistant
+            or self.sys_homeassistant.version == LANDINGPAGE
+            or version_is_new_enough(self.sys_homeassistant.version, _CORE_VERSION)
         ):
             return await handler(request)
 

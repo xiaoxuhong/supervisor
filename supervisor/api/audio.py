@@ -1,4 +1,5 @@
 """Init file for Supervisor Audio RESTful API."""
+
 import asyncio
 from collections.abc import Awaitable
 from dataclasses import asdict
@@ -35,8 +36,7 @@ from ..coresys import CoreSysAttributes
 from ..exceptions import APIError
 from ..host.sound import StreamType
 from ..validate import version_tag
-from .const import CONTENT_TYPE_BINARY
-from .utils import api_process, api_process_raw, api_validate
+from .utils import api_process, api_validate
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -111,11 +111,6 @@ class APIAudio(CoreSysAttributes):
             raise APIError(f"Version {version} is already in use")
         await asyncio.shield(self.sys_plugins.audio.update(version))
 
-    @api_process_raw(CONTENT_TYPE_BINARY)
-    def logs(self, request: web.Request) -> Awaitable[bytes]:
-        """Return Audio Docker logs."""
-        return self.sys_plugins.audio.logs()
-
     @api_process
     def restart(self, request: web.Request) -> Awaitable[None]:
         """Restart Audio plugin."""
@@ -129,7 +124,7 @@ class APIAudio(CoreSysAttributes):
     @api_process
     async def set_volume(self, request: web.Request) -> None:
         """Set audio volume on stream."""
-        source: StreamType = StreamType(request.match_info.get("source"))
+        source: StreamType = StreamType(request.match_info["source"])
         application: bool = request.path.endswith("application")
         body = await api_validate(SCHEMA_VOLUME, request)
 
@@ -142,7 +137,7 @@ class APIAudio(CoreSysAttributes):
     @api_process
     async def set_mute(self, request: web.Request) -> None:
         """Mute audio volume on stream."""
-        source: StreamType = StreamType(request.match_info.get("source"))
+        source: StreamType = StreamType(request.match_info["source"])
         application: bool = request.path.endswith("application")
         body = await api_validate(SCHEMA_MUTE, request)
 
@@ -155,7 +150,7 @@ class APIAudio(CoreSysAttributes):
     @api_process
     async def set_default(self, request: web.Request) -> None:
         """Set audio default stream."""
-        source: StreamType = StreamType(request.match_info.get("source"))
+        source: StreamType = StreamType(request.match_info["source"])
         body = await api_validate(SCHEMA_DEFAULT, request)
 
         await asyncio.shield(self.sys_host.sound.set_default(source, body[ATTR_NAME]))

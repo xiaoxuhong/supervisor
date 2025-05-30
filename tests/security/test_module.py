@@ -1,4 +1,5 @@
 """Testing handling with Security."""
+
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -52,12 +53,14 @@ async def test_force_content_trust(coresys: CoreSys):
 
     coresys.security.force = True
 
-    with patch(
-        "supervisor.security.module.cas_validate",
-        AsyncMock(side_effect=CodeNotaryError),
-    ) as cas_validate:
-        with pytest.raises(CodeNotaryError):
-            await coresys.security.verify_content("test@mail.com", "ffffffffffffff")
+    with (
+        patch(
+            "supervisor.security.module.cas_validate",
+            AsyncMock(side_effect=CodeNotaryError),
+        ) as cas_validate,
+        pytest.raises(CodeNotaryError),
+    ):
+        await coresys.security.verify_content("test@mail.com", "ffffffffffffff")
 
 
 async def test_integrity_check_disabled(coresys: CoreSys):

@@ -1,4 +1,5 @@
 """Core Exceptions."""
+
 from collections.abc import Callable
 
 
@@ -83,10 +84,6 @@ class HomeAssistantWSError(HomeAssistantAPIError):
     """Home Assistant websocket error."""
 
 
-class HomeAssistantWSNotSupported(HomeAssistantWSError):
-    """Raise when WebSockets are not supported."""
-
-
 class HomeAssistantWSConnectionError(HomeAssistantWSError):
     """Raise when the WebSocket connection has an error."""
 
@@ -131,6 +128,14 @@ class HassOSJobError(HassOSError, JobException):
 
 class HassOSDataDiskError(HassOSError):
     """Issues with the DataDisk feature from HAOS."""
+
+
+class HassOSSlotNotFound(HassOSError):
+    """Could not find boot slot."""
+
+
+class HassOSSlotUpdateError(HassOSError):
+    """Error while updating a slot via rauc."""
 
 
 # All Plugins
@@ -267,6 +272,10 @@ class AuthPasswordResetError(HassioError):
     """Auth error if password reset failed."""
 
 
+class AuthListUsersError(HassioError):
+    """Auth error if listing users failed."""
+
+
 # Host
 
 
@@ -304,13 +313,39 @@ class HostLogError(HostError):
 class APIError(HassioError, RuntimeError):
     """API errors."""
 
+    status = 400
+
+    def __init__(
+        self,
+        message: str | None = None,
+        logger: Callable[..., None] | None = None,
+        job_id: str | None = None,
+    ) -> None:
+        """Raise & log, optionally with job."""
+        super().__init__(message, logger)
+        self.job_id = job_id
+
 
 class APIForbidden(APIError):
     """API forbidden error."""
 
+    status = 403
+
+
+class APINotFound(APIError):
+    """API not found error."""
+
+    status = 404
+
 
 class APIAddonNotInstalled(APIError):
     """Not installed addon requested at addons API."""
+
+
+class APIDBMigrationInProgress(APIError):
+    """Service is unavailable due to an offline DB migration is in progress."""
+
+    status = 503
 
 
 # Service / Discovery
@@ -364,7 +399,11 @@ class DBusParseError(DBusError):
 
 
 class DBusTimeoutError(DBusError):
-    """D-Bus call timed out."""
+    """D-Bus call timeout."""
+
+
+class DBusTimedOutError(DBusError):
+    """D-Bus call timed out (typically when systemd D-Bus service activation fail)."""
 
 
 class DBusNoReplyError(DBusError):
@@ -483,6 +522,17 @@ class WhoamiConnectivityError(WhoamiError):
     """Connectivity errors while using whoami."""
 
 
+# utils/systemd_journal
+
+
+class SystemdJournalError(HassioError):
+    """Error while processing systemd journal logs."""
+
+
+class MalformedBinaryEntryError(SystemdJournalError):
+    """Raised when binary entry in the journal isn't followed by a newline."""
+
+
 # docker/api
 
 
@@ -597,8 +647,28 @@ class BackupInvalidError(BackupError):
     """Raise if backup or password provided is invalid."""
 
 
+class BackupMountDownError(BackupError):
+    """Raise if mount specified for backup is down."""
+
+
+class BackupDataDiskBadMessageError(BackupError):
+    """Raise if bad message error received from data disk during backup."""
+
+
 class BackupJobError(BackupError, JobException):
     """Raise on Backup job error."""
+
+
+class BackupFileNotFoundError(BackupError):
+    """Raise if the backup file hasn't been found."""
+
+
+class BackupPermissionError(BackupError):
+    """Raise if we could not write the backup due to permission error."""
+
+
+class BackupFileExistError(BackupError):
+    """Raise if the backup file already exists."""
 
 
 # Security

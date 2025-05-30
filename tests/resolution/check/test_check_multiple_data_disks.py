@@ -1,4 +1,5 @@
 """Test check for multiple data disks."""
+
 # pylint: disable=import-error
 from dataclasses import replace
 from unittest.mock import patch
@@ -17,7 +18,7 @@ from tests.dbus_service_mocks.udisks2_block import Block as BlockService
 
 @pytest.fixture(name="sda1_block_service")
 async def fixture_sda1_block_service(
-    udisks2_services: dict[str, DBusServiceMock | dict[str, DBusServiceMock]]
+    udisks2_services: dict[str, DBusServiceMock | dict[str, DBusServiceMock]],
 ) -> BlockService:
     """Return sda1 block service."""
     yield udisks2_services["udisks2_block"][
@@ -35,7 +36,7 @@ async def test_base(coresys: CoreSys):
 async def test_check(coresys: CoreSys, sda1_block_service: BlockService):
     """Test check."""
     multiple_data_disks = CheckMultipleDataDisks(coresys)
-    coresys.core.state = CoreState.RUNNING
+    await coresys.core.set_state(CoreState.RUNNING)
 
     await multiple_data_disks.run_check()
 
@@ -53,14 +54,17 @@ async def test_check(coresys: CoreSys, sda1_block_service: BlockService):
     assert coresys.resolution.suggestions == [
         Suggestion(
             SuggestionType.RENAME_DATA_DISK, ContextType.SYSTEM, reference="/dev/sda1"
-        )
+        ),
+        Suggestion(
+            SuggestionType.ADOPT_DATA_DISK, ContextType.SYSTEM, reference="/dev/sda1"
+        ),
     ]
 
 
 async def test_approve(coresys: CoreSys, sda1_block_service: BlockService):
     """Test approve."""
     multiple_data_disks = CheckMultipleDataDisks(coresys)
-    coresys.core.state = CoreState.RUNNING
+    await coresys.core.set_state(CoreState.RUNNING)
 
     assert not await multiple_data_disks.approve_check(reference="/dev/sda1")
 
@@ -84,13 +88,13 @@ async def test_did_run(coresys: CoreSys):
         return_value=None,
     ) as check:
         for state in should_run:
-            coresys.core.state = state
+            await coresys.core.set_state(state)
             await multiple_data_disks()
             check.assert_called_once()
             check.reset_mock()
 
         for state in should_not_run:
-            coresys.core.state = state
+            await coresys.core.set_state(state)
             await multiple_data_disks()
             check.assert_not_called()
             check.reset_mock()

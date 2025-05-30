@@ -1,4 +1,5 @@
 """Home Assistant control object."""
+
 import asyncio
 from collections.abc import Awaitable
 from contextlib import suppress
@@ -32,9 +33,10 @@ from ..jobs.decorator import Job, JobCondition
 from ..jobs.job_group import JobGroup
 from ..resolution.const import ContextType, IssueType
 from ..utils import convert_to_ascii
-from ..utils.sentry import capture_exception
+from ..utils.sentry import async_capture_exception
 from .const import (
     LANDINGPAGE,
+    SAFE_MODE_FILENAME,
     WATCHDOG_MAX_ATTEMPTS,
     WATCHDOG_RETRY_SECONDS,
     WATCHDOG_THROTTLE_MAX_CALLS,
@@ -48,6 +50,10 @@ SECONDS_BETWEEN_API_CHECKS: Final[int] = 5
 STARTUP_API_RESPONSE_TIMEOUT: Final[timedelta] = timedelta(minutes=3)
 # All stages plus event start timeout and some wiggle rooom
 STARTUP_API_CHECK_RUNNING_TIMEOUT: Final[timedelta] = timedelta(minutes=15)
+# While database migration is running, the timeout will be extended
+DATABASE_MIGRATION_TIMEOUT: Final[timedelta] = timedelta(
+    seconds=SECONDS_BETWEEN_API_CHECKS * 10
+)
 RE_YAML_ERROR = re.compile(r"homeassistant\.util\.yaml")
 
 
@@ -86,7 +92,16 @@ class HomeAssistantCore(JobGroup):
                     await self.instance.get_latest_version()
                 )
 
-            await self.instance.attach(version=self.sys_homeassistant.version)
+            await self.instance.attach(
+                version=self.sys_homeassistant.version, skip_state_event_if_down=True
+            )
+
+            # Ensure we are using correct image for this system (unless user has overridden it)
+            if not self.sys_homeassistant.override_image:
+                await self.instance.check_image(
+                    self.sys_homeassistant.version, self.sys_homeassistant.default_image
+                )
+                self.sys_homeassistant.set_image(self.sys_homeassistant.default_image)
         except DockerError:
             _LOGGER.info(
                 "No Home Assistant Docker image %s found.", self.sys_homeassistant.image
@@ -94,8 +109,8 @@ class HomeAssistantCore(JobGroup):
             await self.install_landingpage()
         else:
             self.sys_homeassistant.version = self.instance.version
-            self.sys_homeassistant.image = self.instance.image
-            self.sys_homeassistant.save_data()
+            self.sys_homeassistant.set_image(self.instance.image)
+            await self.sys_homeassistant.save_data()
 
         # Start landingpage
         if self.instance.version != LANDINGPAGE:
@@ -115,14 +130,16 @@ class HomeAssistantCore(JobGroup):
         """Install a landing page."""
         # Try to use a preinstalled landingpage
         try:
-            await self.instance.attach(version=LANDINGPAGE)
+            await self.instance.attach(
+                version=LANDINGPAGE, skip_state_event_if_down=True
+            )
         except DockerError:
             pass
         else:
             _LOGGER.info("Using preinstalled landingpage")
             self.sys_homeassistant.version = LANDINGPAGE
-            self.sys_homeassistant.image = self.instance.image
-            self.sys_homeassistant.save_data()
+            self.sys_homeassistant.set_image(self.instance.image)
+            await self.sys_homeassistant.save_data()
             return
 
         _LOGGER.info("Setting up Home Assistant landingpage")
@@ -143,14 +160,14 @@ class HomeAssistantCore(JobGroup):
             except (DockerError, JobException):
                 pass
             except Exception as err:  # pylint: disable=broad-except
-                capture_exception(err)
+                await async_capture_exception(err)
 
             _LOGGER.warning("Failed to install landingpage, retrying after 30sec")
             await asyncio.sleep(30)
 
         self.sys_homeassistant.version = LANDINGPAGE
-        self.sys_homeassistant.image = self.sys_updater.image_homeassistant
-        self.sys_homeassistant.save_data()
+        self.sys_homeassistant.set_image(self.sys_updater.image_homeassistant)
+        await self.sys_homeassistant.save_data()
 
     @Job(
         name="home_assistant_core_install",
@@ -175,15 +192,15 @@ class HomeAssistantCore(JobGroup):
                 except (DockerError, JobException):
                     pass
                 except Exception as err:  # pylint: disable=broad-except
-                    capture_exception(err)
+                    await async_capture_exception(err)
 
             _LOGGER.warning("Error on Home Assistant installation. Retrying in 30sec")
             await asyncio.sleep(30)
 
         _LOGGER.info("Home Assistant docker now installed")
         self.sys_homeassistant.version = self.instance.version
-        self.sys_homeassistant.image = self.sys_updater.image_homeassistant
-        self.sys_homeassistant.save_data()
+        self.sys_homeassistant.set_image(self.sys_updater.image_homeassistant)
+        await self.sys_homeassistant.save_data()
 
         # finishing
         try:
@@ -215,6 +232,12 @@ class HomeAssistantCore(JobGroup):
     ) -> None:
         """Update HomeAssistant version."""
         version = version or self.sys_homeassistant.latest_version
+        if not version:
+            raise HomeAssistantUpdateError(
+                "Cannot determine latest version of Home Assistant for update",
+                _LOGGER.error,
+            )
+
         old_image = self.sys_homeassistant.image
         rollback = self.sys_homeassistant.version if not self.error_state else None
         running = await self.instance.is_running()
@@ -246,14 +269,14 @@ class HomeAssistantCore(JobGroup):
                 ) from err
 
             self.sys_homeassistant.version = self.instance.version
-            self.sys_homeassistant.image = self.sys_updater.image_homeassistant
+            self.sys_homeassistant.set_image(self.sys_updater.image_homeassistant)
 
             if running:
                 await self.start()
             _LOGGER.info("Successfully started Home Assistant %s", to_version)
 
             # Successfull - last step
-            self.sys_homeassistant.save_data()
+            await self.sys_homeassistant.save_data()
             with suppress(DockerError):
                 await self.instance.cleanup(old_image=old_image)
 
@@ -286,11 +309,11 @@ class HomeAssistantCore(JobGroup):
             # Make a copy of the current log file if it exists
             logfile = self.sys_config.path_homeassistant / "home-assistant.log"
             if logfile.exists():
-                backup = (
+                rollback_log = (
                     self.sys_config.path_homeassistant / "home-assistant-rollback.log"
                 )
 
-                shutil.copy(logfile, backup)
+                shutil.copy(logfile, rollback_log)
                 _LOGGER.info(
                     "A backup of the logfile is stored in /config/home-assistant-rollback.log"
                 )
@@ -317,32 +340,32 @@ class HomeAssistantCore(JobGroup):
             except DockerError as err:
                 raise HomeAssistantError() from err
 
-            await self._block_till_run(self.sys_homeassistant.version)
+            await self._block_till_run()
         # No Instance/Container found, extended start
         else:
             # Create new API token
             self.sys_homeassistant.supervisor_token = secrets.token_hex(56)
-            self.sys_homeassistant.save_data()
+            await self.sys_homeassistant.save_data()
 
             # Write audio settings
-            self.sys_homeassistant.write_pulse()
+            await self.sys_homeassistant.write_pulse()
 
             try:
-                await self.instance.run()
+                await self.instance.run(restore_job_id=self.sys_backups.current_restore)
             except DockerError as err:
                 raise HomeAssistantError() from err
 
-            await self._block_till_run(self.sys_homeassistant.version)
+            await self._block_till_run()
 
     @Job(
         name="home_assistant_core_stop",
         limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=HomeAssistantJobError,
     )
-    async def stop(self) -> None:
+    async def stop(self, *, remove_container: bool = False) -> None:
         """Stop Home Assistant Docker."""
         try:
-            return await self.instance.stop(remove_container=False)
+            return await self.instance.stop(remove_container=remove_container)
         except DockerError as err:
             raise HomeAssistantError() from err
 
@@ -351,22 +374,36 @@ class HomeAssistantCore(JobGroup):
         limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=HomeAssistantJobError,
     )
-    async def restart(self) -> None:
+    async def restart(self, *, safe_mode: bool = False) -> None:
         """Restart Home Assistant Docker."""
+        # Create safe mode marker file if necessary
+        if safe_mode:
+            _LOGGER.debug("Creating safe mode marker file.")
+            await self.sys_run_in_executor(
+                (self.sys_config.path_homeassistant / SAFE_MODE_FILENAME).touch
+            )
+
         try:
             await self.instance.restart()
         except DockerError as err:
             raise HomeAssistantError() from err
 
-        await self._block_till_run(self.sys_homeassistant.version)
+        await self._block_till_run()
 
     @Job(
         name="home_assistant_core_rebuild",
         limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=HomeAssistantJobError,
     )
-    async def rebuild(self) -> None:
+    async def rebuild(self, *, safe_mode: bool = False) -> None:
         """Rebuild Home Assistant Docker container."""
+        # Create safe mode marker file if necessary
+        if safe_mode:
+            _LOGGER.debug("Creating safe mode marker file.")
+            await self.sys_run_in_executor(
+                (self.sys_config.path_homeassistant / SAFE_MODE_FILENAME).touch
+            )
+
         with suppress(DockerError):
             await self.instance.stop()
         await self.start()
@@ -409,7 +446,7 @@ class HomeAssistantCore(JobGroup):
     @property
     def in_progress(self) -> bool:
         """Return True if a task is in progress."""
-        return self.instance.in_progress or self.active_job
+        return self.instance.in_progress or self.active_job is not None
 
     async def check_config(self) -> ConfigResult:
         """Run Home Assistant config check."""
@@ -436,10 +473,10 @@ class HomeAssistantCore(JobGroup):
         _LOGGER.info("Home Assistant config is valid")
         return ConfigResult(True, log)
 
-    async def _block_till_run(self, version: AwesomeVersion) -> None:
+    async def _block_till_run(self) -> None:
         """Block until Home-Assistant is booting up or startup timeout."""
         # Skip landingpage
-        if version == LANDINGPAGE:
+        if self.sys_homeassistant.version == LANDINGPAGE:
             return
         _LOGGER.info("Wait until Home Assistant is ready")
 
@@ -464,10 +501,14 @@ class HomeAssistantCore(JobGroup):
                     _LOGGER.info("Home Assistant Core state changed to %s", state)
                     last_state = state
 
-                if state == "RUNNING":
+                if state.core_state == "RUNNING":
                     _LOGGER.info("Detect a running Home Assistant instance")
                     self._error_state = False
                     return
+
+                if state.offline_db_migration:
+                    # Keep extended the deadline while database migration is active
+                    deadline = datetime.now() + DATABASE_MIGRATION_TIMEOUT
 
         self._error_state = True
         if timeout:
@@ -522,7 +563,7 @@ class HomeAssistantCore(JobGroup):
                     try:
                         await self.start()
                     except HomeAssistantError as err:
-                        capture_exception(err)
+                        await async_capture_exception(err)
                     else:
                         break
 
@@ -534,7 +575,7 @@ class HomeAssistantCore(JobGroup):
                 except HomeAssistantError as err:
                     attempts = attempts + 1
                     _LOGGER.error("Watchdog restart of Home Assistant failed!")
-                    capture_exception(err)
+                    await async_capture_exception(err)
                 else:
                     break
 

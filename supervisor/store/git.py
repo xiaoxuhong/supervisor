@@ -1,4 +1,5 @@
 """Init file for Supervisor add-on Git."""
+
 import asyncio
 import functools as ft
 import logging
@@ -48,7 +49,7 @@ class GitRepo(CoreSysAttributes):
 
     async def load(self) -> None:
         """Init Git add-on repository."""
-        if not self.path.is_dir():
+        if not await self.sys_run_in_executor((self.path / ".git").is_dir):
             await self.clone()
             return
 
@@ -96,7 +97,9 @@ class GitRepo(CoreSysAttributes):
             }
 
             try:
-                _LOGGER.info("Cloning add-on %s repository", self.url)
+                _LOGGER.info(
+                    "Cloning add-on %s repository from %s", self.path, self.url
+                )
                 self.repo = await self.sys_run_in_executor(
                     ft.partial(
                         git.Repo.clone_from, self.url, str(self.path), **git_args
@@ -117,7 +120,7 @@ class GitRepo(CoreSysAttributes):
         conditions=[JobCondition.FREE_SPACE, JobCondition.INTERNET_SYSTEM],
         on_condition=StoreJobError,
     )
-    async def pull(self):
+    async def pull(self) -> bool:
         """Pull Git add-on repo."""
         if self.lock.locked():
             _LOGGER.warning("There is already a task in progress")
@@ -127,7 +130,14 @@ class GitRepo(CoreSysAttributes):
             return
 
         async with self.lock:
-            _LOGGER.info("Update add-on %s repository", self.url)
+            _LOGGER.info("Update add-on %s repository from %s", self.path, self.url)
+
+            try:
+                git_cmd = git.Git()
+                await self.sys_run_in_executor(git_cmd.ls_remote, "--heads", self.url)
+            except git.CommandError as err:
+                _LOGGER.warning("Wasn't able to update %s repo: %s.", self.url, err)
+                raise StoreGitError() from err
 
             try:
                 branch = self.repo.active_branch.name
@@ -140,10 +150,13 @@ class GitRepo(CoreSysAttributes):
                     )
                 )
 
-                # Jump on top of that
-                await self.sys_run_in_executor(
-                    ft.partial(self.repo.git.reset, f"origin/{branch}", hard=True)
-                )
+                if changed := self.repo.commit(branch) != self.repo.commit(
+                    f"origin/{branch}"
+                ):
+                    # Jump on top of that
+                    await self.sys_run_in_executor(
+                        ft.partial(self.repo.git.reset, f"origin/{branch}", hard=True)
+                    )
 
                 # Update submodules
                 await self.sys_run_in_executor(
@@ -159,6 +172,8 @@ class GitRepo(CoreSysAttributes):
 
                 # Cleanup old data
                 await self.sys_run_in_executor(ft.partial(self.repo.git.clean, "-xdf"))
+
+                return changed
 
             except (
                 git.InvalidGitRepositoryError,
@@ -183,9 +198,13 @@ class GitRepo(CoreSysAttributes):
             _LOGGER.warning("There is already a task in progress")
             return
 
-        if not self.path.is_dir():
-            return
-        await remove_folder(self.path)
+        def _remove_git_dir(path: Path) -> None:
+            if not path.is_dir():
+                return
+            remove_folder(path)
+
+        async with self.lock:
+            await self.sys_run_in_executor(_remove_git_dir, self.path)
 
 
 class GitRepoHassIO(GitRepo):

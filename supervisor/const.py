@@ -1,14 +1,15 @@
 """Constants file for Supervisor."""
+
 from dataclasses import dataclass
 from enum import StrEnum
-from ipaddress import ip_network
+from ipaddress import IPv4Network
 from pathlib import Path
 from sys import version_info as systemversion
 from typing import Self
 
 from aiohttp import __version__ as aiohttpversion
 
-SUPERVISOR_VERSION = "99.9.9dev"
+SUPERVISOR_VERSION = "9999.09.9.dev9999"
 SERVER_SOFTWARE = f"HomeAssistantSupervisor/{SUPERVISOR_VERSION} aiohttp/{aiohttpversion} Python/{systemversion[0]}.{systemversion[1]}"
 
 URL_HASSIO_ADDONS = "https://github.com/home-assistant/addons"
@@ -40,8 +41,8 @@ SYSTEMD_JOURNAL_PERSISTENT = Path("/var/log/journal")
 SYSTEMD_JOURNAL_VOLATILE = Path("/run/log/journal")
 
 DOCKER_NETWORK = "hassio"
-DOCKER_NETWORK_MASK = ip_network("172.30.32.0/23")
-DOCKER_NETWORK_RANGE = ip_network("172.30.33.0/24")
+DOCKER_NETWORK_MASK = IPv4Network("172.30.32.0/23")
+DOCKER_NETWORK_RANGE = IPv4Network("172.30.33.0/24")
 
 # This needs to match the dockerd --cpu-rt-runtime= argument.
 DOCKER_CPU_RUNTIME_TOTAL = 950_000
@@ -68,6 +69,7 @@ META_SUPERVISOR = "supervisor"
 JSON_DATA = "data"
 JSON_MESSAGE = "message"
 JSON_RESULT = "result"
+JSON_JOB_ID = "job_id"
 
 RESULT_ERROR = "error"
 RESULT_OK = "ok"
@@ -95,6 +97,7 @@ ATTR_ADDON = "addon"
 ATTR_ADDONS = "addons"
 ATTR_ADDONS_CUSTOM_LIST = "addons_custom_list"
 ATTR_ADDONS_REPOSITORIES = "addons_repositories"
+ATTR_ADDR_GEN_MODE = "addr_gen_mode"
 ATTR_ADDRESS = "address"
 ATTR_ADDRESS_DATA = "address-data"
 ATTR_ADMIN = "admin"
@@ -138,6 +141,7 @@ ATTR_CONNECTIONS = "connections"
 ATTR_CONTAINERS = "containers"
 ATTR_CONTENT = "content"
 ATTR_CONTENT_TRUST = "content_trust"
+ATTR_COUNTRY = "country"
 ATTR_CPE = "cpe"
 ATTR_CPU_PERCENT = "cpu_percent"
 ATTR_CRYPTO = "crypto"
@@ -150,6 +154,7 @@ ATTR_DEFAULT = "default"
 ATTR_DEPLOYMENT = "deployment"
 ATTR_DESCRIPTON = "description"
 ATTR_DETACHED = "detached"
+ATTR_DETECT_BLOCKING_IO = "detect_blocking_io"
 ATTR_DEVICES = "devices"
 ATTR_DEVICETREE = "devicetree"
 ATTR_DIAGNOSTICS = "diagnostics"
@@ -171,6 +176,7 @@ ATTR_ENABLED = "enabled"
 ATTR_ENVIRONMENT = "environment"
 ATTR_EVENT = "event"
 ATTR_EXCLUDE_DATABASE = "exclude_database"
+ATTR_EXTRA = "extra"
 ATTR_FEATURES = "features"
 ATTR_FILENAME = "filename"
 ATTR_FLAGS = "flags"
@@ -215,9 +221,11 @@ ATTR_INSTALLED = "installed"
 ATTR_INTERFACE = "interface"
 ATTR_INTERFACES = "interfaces"
 ATTR_IP_ADDRESS = "ip_address"
+ATTR_IP6_PRIVACY = "ip6_privacy"
 ATTR_IPV4 = "ipv4"
 ATTR_IPV6 = "ipv6"
 ATTR_ISSUES = "issues"
+ATTR_JOB_ID = "job_id"
 ATTR_JOURNALD = "journald"
 ATTR_KERNEL = "kernel"
 ATTR_KERNEL_MODULES = "kernel_modules"
@@ -225,7 +233,7 @@ ATTR_LABELS = "labels"
 ATTR_LAST_BOOT = "last_boot"
 ATTR_LEGACY = "legacy"
 ATTR_LOCALS = "locals"
-ATTR_LOCATON = "location"
+ATTR_LOCATION = "location"
 ATTR_LOGGING = "logging"
 ATTR_LOGO = "logo"
 ATTR_LONG_DESCRIPTION = "long_description"
@@ -257,6 +265,7 @@ ATTR_PANEL_TITLE = "panel_title"
 ATTR_PANELS = "panels"
 ATTR_PARENT = "parent"
 ATTR_PASSWORD = "password"
+ATTR_PATH = "path"
 ATTR_PLUGINS = "plugins"
 ATTR_PORT = "port"
 ATTR_PORTS = "ports"
@@ -290,6 +299,7 @@ ATTR_SESSION_DATA_USER = "user"
 ATTR_SESSION_DATA_USER_ID = "user_id"
 ATTR_SIGNAL = "signal"
 ATTR_SIZE = "size"
+ATTR_SIZE_BYTES = "size_bytes"
 ATTR_SLUG = "slug"
 ATTR_SOURCE = "source"
 ATTR_SQUASH = "squash"
@@ -307,7 +317,11 @@ ATTR_SUPERVISOR_INTERNET = "supervisor_internet"
 ATTR_SUPERVISOR_VERSION = "supervisor_version"
 ATTR_SUPPORTED = "supported"
 ATTR_SUPPORTED_ARCH = "supported_arch"
+ATTR_SWAP_SIZE = "swap_size"
+ATTR_SWAPPINESS = "swappiness"
 ATTR_SYSTEM = "system"
+ATTR_SYSTEM_MANAGED = "system_managed"
+ATTR_SYSTEM_MANAGED_CONFIG_ENTRY = "system_managed_config_entry"
 ATTR_TIMEOUT = "timeout"
 ATTR_TIMEZONE = "timezone"
 ATTR_TITLE = "title"
@@ -331,6 +345,7 @@ ATTR_UUID = "uuid"
 ATTR_VALID = "valid"
 ATTR_VALUE = "value"
 ATTR_VERSION = "version"
+ATTR_VERSION_TIMESTAMP = "version_timestamp"
 ATTR_VERSION_LATEST = "version_latest"
 ATTR_VIDEO = "video"
 ATTR_VLAN = "vlan"
@@ -377,11 +392,26 @@ ROLE_ADMIN = "admin"
 ROLE_ALL = [ROLE_DEFAULT, ROLE_HOMEASSISTANT, ROLE_BACKUP, ROLE_MANAGER, ROLE_ADMIN]
 
 
+class AddonBootConfig(StrEnum):
+    """Boot mode config for the add-on."""
+
+    AUTO = "auto"
+    MANUAL = "manual"
+    MANUAL_ONLY = "manual_only"
+
+
 class AddonBoot(StrEnum):
     """Boot mode for the add-on."""
 
     AUTO = "auto"
     MANUAL = "manual"
+
+    @classmethod
+    def _missing_(cls, value: str) -> Self | None:
+        """Convert 'forced' config values to their counterpart."""
+        if value == AddonBootConfig.MANUAL_ONLY:
+            return AddonBoot.MANUAL
+        return None
 
 
 class AddonStartup(StrEnum):
@@ -458,9 +488,12 @@ class HostFeature(StrEnum):
 class BusEvent(StrEnum):
     """Bus event type."""
 
+    DOCKER_CONTAINER_STATE_CHANGE = "docker_container_state_change"
     HARDWARE_NEW_DEVICE = "hardware_new_device"
     HARDWARE_REMOVE_DEVICE = "hardware_remove_device"
-    DOCKER_CONTAINER_STATE_CHANGE = "docker_container_state_change"
+    SUPERVISOR_CONNECTIVITY_CHANGE = "supervisor_connectivity_change"
+    SUPERVISOR_JOB_END = "supervisor_job_end"
+    SUPERVISOR_JOB_START = "supervisor_job_start"
     SUPERVISOR_STATE_CHANGE = "supervisor_state_change"
 
 
@@ -521,3 +554,12 @@ STARTING_STATES = [
     CoreState.STARTUP,
     CoreState.SETUP,
 ]
+
+# States in which the API can be used (enforced by system_validation())
+VALID_API_STATES = frozenset(
+    {
+        CoreState.STARTUP,
+        CoreState.RUNNING,
+        CoreState.FREEZE,
+    }
+)

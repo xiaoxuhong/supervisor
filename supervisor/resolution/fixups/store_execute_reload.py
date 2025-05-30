@@ -1,4 +1,5 @@
 """Helpers to check and fix issues with free space."""
+
 import logging
 
 from ...coresys import CoreSys
@@ -41,7 +42,7 @@ class FixupStoreExecuteReload(FixupBase):
         # Load data again
         try:
             await repository.load()
-            await repository.update()
+            await self.sys_store.reload(repository)
         except StoreError:
             raise ResolutionFixupError() from None
 

@@ -1,4 +1,5 @@
 """Add-on static data."""
+
 from datetime import timedelta
 from enum import StrEnum
 
@@ -28,6 +29,7 @@ class MappingType(StrEnum):
 
 
 ATTR_BACKUP = "backup"
+ATTR_BREAKING_VERSIONS = "breaking_versions"
 ATTR_CODENOTARY = "codenotary"
 ATTR_READ_ONLY = "read_only"
 ATTR_PATH = "path"

@@ -1,4 +1,5 @@
 """Small wrapper for CodeNotary."""
+
 from __future__ import annotations
 
 import asyncio
@@ -9,11 +10,10 @@ from pathlib import Path
 import shlex
 from typing import Final
 
-import async_timeout
 from dirhash import dirhash
 
-from . import clean_env
 from ..exceptions import CodeNotaryBackendError, CodeNotaryError, CodeNotaryUntrusted
+from . import clean_env
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ async def cas_validate(
             env=clean_env(),
         )
 
-        async with async_timeout.timeout(15):
+        async with asyncio.timeout(15):
             data, error = await proc.communicate()
     except TimeoutError:
         raise CodeNotaryBackendError(

@@ -1,20 +1,19 @@
 """Handle discover message for Home Assistant."""
+
 from __future__ import annotations
 
 from contextlib import suppress
 import logging
 from typing import TYPE_CHECKING, Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import attr
-import voluptuous as vol
-from voluptuous.humanize import humanize_error
 
 from ..const import ATTR_CONFIG, ATTR_DISCOVERY, FILE_HASSIO_DISCOVERY
 from ..coresys import CoreSys, CoreSysAttributes
-from ..exceptions import DiscoveryError, HomeAssistantAPIError
+from ..exceptions import HomeAssistantAPIError
 from ..utils.common import FileConfiguration
-from .validate import SCHEMA_DISCOVERY_CONFIG, valid_discovery_config
+from .validate import SCHEMA_DISCOVERY_CONFIG
 
 if TYPE_CHECKING:
     from ..addons.addon import Addon
@@ -32,7 +31,7 @@ class Message:
     addon: str = attr.ib()
     service: str = attr.ib()
     config: dict[str, Any] = attr.ib(eq=False)
-    uuid: UUID = attr.ib(factory=lambda: uuid4().hex, eq=False)
+    uuid: str = attr.ib(factory=lambda: uuid4().hex, eq=False)
 
 
 class Discovery(CoreSysAttributes, FileConfiguration):
@@ -54,7 +53,7 @@ class Discovery(CoreSysAttributes, FileConfiguration):
         _LOGGER.info("Loaded %d messages", len(messages))
         self.message_obj = messages
 
-    def save(self) -> None:
+    async def save(self) -> None:
         """Write discovery message into data file."""
         messages: list[dict[str, Any]] = []
         for message in self.list_messages:
@@ -62,7 +61,7 @@ class Discovery(CoreSysAttributes, FileConfiguration):
 
         self._data[ATTR_DISCOVERY].clear()
         self._data[ATTR_DISCOVERY].extend(messages)
-        self.save_data()
+        await self.save_data()
 
     def get(self, uuid: str) -> Message | None:
         """Return discovery message."""
@@ -73,14 +72,8 @@ class Discovery(CoreSysAttributes, FileConfiguration):
         """Return list of available discovery messages."""
         return list(self.message_obj.values())
 
-    def send(self, addon: Addon, service: str, config: dict[str, Any]) -> Message:
+    async def send(self, addon: Addon, service: str, config: dict[str, Any]) -> Message:
         """Send a discovery message to Home Assistant."""
-        try:
-            config = valid_discovery_config(service, config)
-        except vol.Invalid as err:
-            _LOGGER.error("Invalid discovery %s config", humanize_error(config, err))
-            raise DiscoveryError() from err
-
         # Create message
         message = Message(addon.slug, service, config)
 
@@ -100,15 +93,15 @@ class Discovery(CoreSysAttributes, FileConfiguration):
             "Sending discovery to Home Assistant %s from %s", service, addon.slug
         )
         self.message_obj[message.uuid] = message
-        self.save()
+        await self.save()
 
         self.sys_create_task(self._push_discovery(message, CMD_NEW))
         return message
 
-    def remove(self, message: Message) -> None:
+    async def remove(self, message: Message) -> None:
         """Remove a discovery message from Home Assistant."""
         self.message_obj.pop(message.uuid, None)
-        self.save()
+        await self.save()
 
         _LOGGER.info(
             "Delete discovery to Home Assistant %s from %s",

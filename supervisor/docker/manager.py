@@ -1,10 +1,13 @@
 """Manager for Supervisor Docker."""
+
+import asyncio
 from contextlib import suppress
+from functools import partial
 from ipaddress import IPv4Address
 import logging
 import os
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Self, cast
 
 import attr
 from awesomeversion import AwesomeVersion, AwesomeVersionCompareException
@@ -80,7 +83,7 @@ class DockerInfo:
         """Return true, if CONFIG_RT_GROUP_SCHED is loaded."""
         if not Path("/sys/fs/cgroup/cpu/cpu.rt_runtime_us").exists():
             return False
-        return bool(os.environ.get(ENV_SUPERVISOR_CPU_RT, 0))
+        return bool(os.environ.get(ENV_SUPERVISOR_CPU_RT) == "1")
 
 
 class DockerConfig(FileConfiguration):
@@ -104,13 +107,41 @@ class DockerAPI:
 
     def __init__(self, coresys: CoreSys):
         """Initialize Docker base wrapper."""
-        self.docker: DockerClient = DockerClient(
-            base_url=f"unix:/{str(SOCKET_DOCKER)}", version="auto", timeout=900
-        )
-        self.network: DockerNetwork = DockerNetwork(self.docker)
-        self._info: DockerInfo = DockerInfo.new(self.docker.info())
+        self._docker: DockerClient | None = None
+        self._network: DockerNetwork | None = None
+        self._info: DockerInfo | None = None
         self.config: DockerConfig = DockerConfig()
         self._monitor: DockerMonitor = DockerMonitor(coresys)
+
+    async def post_init(self) -> Self:
+        """Post init actions that must be done in event loop."""
+        self._docker = await asyncio.get_running_loop().run_in_executor(
+            None,
+            partial(
+                DockerClient,
+                base_url=f"unix:/{str(SOCKET_DOCKER)}",
+                version="auto",
+                timeout=900,
+            ),
+        )
+        self._network = DockerNetwork(self._docker)
+        self._info = DockerInfo.new(self.docker.info())
+        await self.config.read_data()
+        return self
+
+    @property
+    def docker(self) -> DockerClient:
+        """Get docker API client."""
+        if not self._docker:
+            raise RuntimeError("Docker API Client not initialized!")
+        return self._docker
+
+    @property
+    def network(self) -> DockerNetwork:
+        """Get Docker network."""
+        if not self._network:
+            raise RuntimeError("Docker Network not initialized!")
+        return self._network
 
     @property
     def images(self) -> ImageCollection:
@@ -130,6 +161,8 @@ class DockerAPI:
     @property
     def info(self) -> DockerInfo:
         """Return local docker info."""
+        if not self._info:
+            raise RuntimeError("Docker Info not initialized!")
         return self._info
 
     @property
@@ -169,7 +202,7 @@ class DockerAPI:
         if "labels" not in kwargs:
             kwargs["labels"] = {}
         elif isinstance(kwargs["labels"], list):
-            kwargs["labels"] = {label: "" for label in kwargs["labels"]}
+            kwargs["labels"] = dict.fromkeys(kwargs["labels"], "")
 
         kwargs["labels"][LABEL_MANAGED] = ""
 
@@ -177,6 +210,11 @@ class DockerAPI:
         if dns:
             kwargs["dns"] = [str(self.network.dns)]
             kwargs["dns_search"] = [DNS_SUFFIX]
+            # CoreDNS forward plug-in fails in ~6s, then fallback triggers.
+            # However, the default timeout of glibc and musl is 5s. Increase
+            # default timeout to make sure CoreDNS fallback is working
+            # on first query.
+            kwargs["dns_opt"] = ["timeout:10"]
             if hostname:
                 kwargs["domainname"] = DNS_SUFFIX
 
@@ -217,7 +255,7 @@ class DockerAPI:
 
             # Check if container is register on host
             # https://github.com/moby/moby/issues/23302
-            if name in (
+            if name and name in (
                 val.get("Name")
                 for val in host_network.attrs.get("Containers", {}).values()
             ):
@@ -367,7 +405,8 @@ class DockerAPI:
 
         # Check the image is correct and state is good
         return (
-            docker_container.image.id == docker_image.id
+            docker_container.image is not None
+            and docker_container.image.id == docker_image.id
             and docker_container.status in ("exited", "running", "created")
         )
 
@@ -502,7 +541,7 @@ class DockerAPI:
         """Import a tar file as image."""
         try:
             with tar_file.open("rb") as read_tar:
-                docker_image_list: list[Image] = self.images.load(read_tar)
+                docker_image_list: list[Image] = self.images.load(read_tar)  # type: ignore
 
             if len(docker_image_list) != 1:
                 _LOGGER.warning(
@@ -519,7 +558,7 @@ class DockerAPI:
     def export_image(self, image: str, version: AwesomeVersion, tar_file: Path) -> None:
         """Export current images into a tar file."""
         try:
-            image = self.api.get_image(f"{image}:{version}")
+            docker_image = self.api.get_image(f"{image}:{version}")
         except (DockerException, requests.RequestException) as err:
             raise DockerError(
                 f"Can't fetch image {image}: {err}", _LOGGER.error
@@ -528,7 +567,7 @@ class DockerAPI:
         _LOGGER.info("Export image %s to %s", image, tar_file)
         try:
             with tar_file.open("wb") as write_tar:
-                for chunk in image:
+                for chunk in docker_image:
                     write_tar.write(chunk)
         except (OSError, requests.RequestException) as err:
             raise DockerError(
@@ -542,10 +581,13 @@ class DockerAPI:
         current_image: str,
         current_version: AwesomeVersion,
         old_images: set[str] | None = None,
+        *,
+        keep_images: set[str] | None = None,
     ) -> None:
         """Clean up old versions of an image."""
+        image = f"{current_image}:{current_version!s}"
         try:
-            current: Image = self.images.get(f"{current_image}:{current_version!s}")
+            keep = {cast(str, self.images.get(image).id)}
         except ImageNotFound:
             raise DockerNotFound(
                 f"{current_image} not found for cleanup", _LOGGER.warning
@@ -555,21 +597,36 @@ class DockerAPI:
                 f"Can't get {current_image} for cleanup", _LOGGER.warning
             ) from err
 
+        if keep_images:
+            keep_images -= {image}
+            try:
+                for image in keep_images:
+                    # If its not found, no need to preserve it from getting removed
+                    with suppress(ImageNotFound):
+                        keep.add(cast(str, self.images.get(image).id))
+            except (DockerException, requests.RequestException) as err:
+                raise DockerError(
+                    f"Failed to get one or more images from {keep} during cleanup",
+                    _LOGGER.warning,
+                ) from err
+
         # Cleanup old and current
         image_names = list(
             old_images | {current_image} if old_images else {current_image}
         )
         try:
-            images_list = self.images.list(name=image_names)
+            # This API accepts a list of image names. Tested and confirmed working on docker==7.1.0
+            # Its typing does say only `str` though. Bit concerning, could an update break this?
+            images_list = self.images.list(name=image_names)  # type: ignore
         except (DockerException, requests.RequestException) as err:
             raise DockerError(
                 f"Corrupt docker overlayfs found: {err}", _LOGGER.warning
             ) from err
 
-        for image in images_list:
-            if current.id == image.id:
+        for docker_image in images_list:
+            if docker_image.id in keep:
                 continue
 
             with suppress(DockerException, requests.RequestException):
-                _LOGGER.info("Cleanup images: %s", image.tags)
-                self.images.remove(image.id, force=True)
+                _LOGGER.info("Cleanup images: %s", docker_image.tags)
+                self.images.remove(docker_image.id, force=True)

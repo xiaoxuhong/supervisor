@@ -1,6 +1,8 @@
 """Job decorator."""
+
 import asyncio
 from collections.abc import Callable
+from contextlib import suppress
 from datetime import datetime, timedelta
 from functools import wraps
 import logging
@@ -16,7 +18,8 @@ from ..exceptions import (
 )
 from ..host.const import HostFeature
 from ..resolution.const import MINIMUM_FREE_SPACE_THRESHOLD, ContextType, IssueType
-from ..utils.sentry import capture_exception
+from ..utils.sentry import async_capture_exception
+from . import SupervisorJob
 from .const import JobCondition, JobExecutionLimit
 from .job_group import JobGroup
 
@@ -32,7 +35,7 @@ class Job(CoreSysAttributes):
         name: str,
         conditions: list[JobCondition] | None = None,
         cleanup: bool = True,
-        on_condition: JobException | None = None,
+        on_condition: type[JobException] | None = None,
         limit: JobExecutionLimit | None = None,
         throttle_period: timedelta
         | Callable[[CoreSys, datetime, list[datetime] | None], timedelta]
@@ -145,10 +148,8 @@ class Job(CoreSysAttributes):
     def _post_init(self, obj: JobGroup | CoreSysAttributes) -> JobGroup | None:
         """Runtime init."""
         # Coresys
-        try:
+        with suppress(AttributeError):
             self.coresys = obj.coresys
-        except AttributeError:
-            pass
         if not self.coresys:
             raise RuntimeError(f"Job on {self.name} need to be an coresys object!")
 
@@ -157,22 +158,23 @@ class Job(CoreSysAttributes):
             self._lock = asyncio.Semaphore()
 
         # Job groups
-        if self.limit in (
+        try:
+            is_job_group = obj.acquire and obj.release
+        except AttributeError:
+            is_job_group = False
+
+        if not is_job_group and self.limit in (
             JobExecutionLimit.GROUP_ONCE,
             JobExecutionLimit.GROUP_WAIT,
             JobExecutionLimit.GROUP_THROTTLE,
             JobExecutionLimit.GROUP_THROTTLE_WAIT,
             JobExecutionLimit.GROUP_THROTTLE_RATE_LIMIT,
         ):
-            try:
-                _ = obj.acquire and obj.release
-            except AttributeError:
-                raise RuntimeError(
-                    f"Job on {self.name} need to be a JobGroup to use group based limits!"
-                ) from None
+            raise RuntimeError(
+                f"Job on {self.name} need to be a JobGroup to use group based limits!"
+            ) from None
 
-            return obj
-        return None
+        return obj if is_job_group else None
 
     def _handle_job_condition_exception(self, err: JobConditionException) -> None:
         """Handle a job condition failure."""
@@ -187,7 +189,13 @@ class Job(CoreSysAttributes):
         self._method = method
 
         @wraps(method)
-        async def wrapper(obj: JobGroup | CoreSysAttributes, *args, **kwargs) -> Any:
+        async def wrapper(
+            obj: JobGroup | CoreSysAttributes,
+            *args,
+            _job__use_existing: SupervisorJob | None = None,
+            _job_override__cleanup: bool | None = None,
+            **kwargs,
+        ) -> Any:
             """Wrap the method.
 
             This method must be on an instance of CoreSysAttributes. If a JOB_GROUP limit
@@ -195,11 +203,18 @@ class Job(CoreSysAttributes):
             """
             job_group = self._post_init(obj)
             group_name: str | None = job_group.group_name if job_group else None
-            job = self.sys_jobs.new_job(
-                self.name,
-                job_group.job_reference if job_group else None,
-                internal=self._internal,
-            )
+            if _job__use_existing:
+                job = _job__use_existing
+                job.name = self.name
+                job.internal = self._internal
+                if job_group:
+                    job.reference = job_group.job_reference
+            else:
+                job = self.sys_jobs.new_job(
+                    self.name,
+                    job_group.job_reference if job_group else None,
+                    internal=self._internal,
+                )
 
             try:
                 # Handle condition
@@ -293,10 +308,12 @@ class Job(CoreSysAttributes):
                     except JobConditionException as err:
                         return self._handle_job_condition_exception(err)
                     except HassioError as err:
+                        job.capture_error(err)
                         raise err
                     except Exception as err:
                         _LOGGER.exception("Unhandled exception: %s", err)
-                        capture_exception(err)
+                        job.capture_error()
+                        await async_capture_exception(err)
                         raise JobException() from err
                     finally:
                         self._release_exception_limits()
@@ -308,7 +325,12 @@ class Job(CoreSysAttributes):
 
             # Jobs that weren't started are always cleaned up. Also clean up done jobs if required
             finally:
-                if job.done is None or self.cleanup:
+                if (
+                    job.done is None
+                    or _job_override__cleanup
+                    or _job_override__cleanup is None
+                    and self.cleanup
+                ):
                     self.sys_jobs.remove_job(job)
 
         return wrapper
@@ -351,13 +373,14 @@ class Job(CoreSysAttributes):
 
         if (
             JobCondition.FREE_SPACE in used_conditions
-            and coresys.sys_host.info.free_space < MINIMUM_FREE_SPACE_THRESHOLD
+            and (free_space := await coresys.sys_host.info.free_space())
+            < MINIMUM_FREE_SPACE_THRESHOLD
         ):
             coresys.sys_resolution.create_issue(
                 IssueType.FREE_SPACE, ContextType.SYSTEM
             )
             raise JobConditionException(
-                f"'{method_name}' blocked from execution, not enough free space ({coresys.sys_host.info.free_space}GB) left on the device"
+                f"'{method_name}' blocked from execution, not enough free space ({free_space}GB) left on the device"
             )
 
         if JobCondition.INTERNET_SYSTEM in used_conditions:

@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+from unittest.util import unorderable_list_difference
 
 from dbus_fast import DBusError, ErrorType, Variant
 from dbus_fast.aio.message_bus import MessageBus
@@ -52,7 +53,7 @@ SHARE_TEST_DATA = {
 
 @pytest.fixture(name="mount")
 async def fixture_mount(
-    coresys: CoreSys, tmp_supervisor_data, path_extern, mount_propagation
+    coresys: CoreSys, tmp_supervisor_data, path_extern, mount_propagation, mock_is_mount
 ) -> Mount:
     """Add an initial mount and load mounts."""
     mount = Mount.from_dict(coresys, MEDIA_TEST_DATA)
@@ -111,40 +112,46 @@ async def test_load(
     assert media_test.local_where.is_dir()
     assert (coresys.config.path_media / "media_test").is_dir()
 
-    assert systemd_service.StartTransientUnit.calls == [
-        (
-            "mnt-data-supervisor-mounts-backup_test.mount",
-            "fail",
-            [
-                ["Options", Variant("s", "noserverino,guest")],
-                ["Type", Variant("s", "cifs")],
-                ["Description", Variant("s", "Supervisor cifs mount: backup_test")],
-                ["What", Variant("s", "//backup.local/backups")],
-            ],
-            [],
-        ),
-        (
-            "mnt-data-supervisor-mounts-media_test.mount",
-            "fail",
-            [
-                ["Options", Variant("s", "soft,timeo=200")],
-                ["Type", Variant("s", "nfs")],
-                ["Description", Variant("s", "Supervisor nfs mount: media_test")],
-                ["What", Variant("s", "media.local:/media")],
-            ],
-            [],
-        ),
-        (
-            "mnt-data-supervisor-media-media_test.mount",
-            "fail",
-            [
-                ["Options", Variant("s", "bind")],
-                ["Description", Variant("s", "Supervisor bind mount: bind_media_test")],
-                ["What", Variant("s", "/mnt/data/supervisor/mounts/media_test")],
-            ],
-            [],
-        ),
-    ]
+    assert unorderable_list_difference(
+        systemd_service.StartTransientUnit.calls,
+        [
+            (
+                "mnt-data-supervisor-mounts-backup_test.mount",
+                "fail",
+                [
+                    ["Options", Variant("s", "noserverino,guest")],
+                    ["Type", Variant("s", "cifs")],
+                    ["Description", Variant("s", "Supervisor cifs mount: backup_test")],
+                    ["What", Variant("s", "//backup.local/backups")],
+                ],
+                [],
+            ),
+            (
+                "mnt-data-supervisor-mounts-media_test.mount",
+                "fail",
+                [
+                    ["Options", Variant("s", "soft,timeo=200")],
+                    ["Type", Variant("s", "nfs")],
+                    ["Description", Variant("s", "Supervisor nfs mount: media_test")],
+                    ["What", Variant("s", "media.local:/media")],
+                ],
+                [],
+            ),
+            (
+                "mnt-data-supervisor-media-media_test.mount",
+                "fail",
+                [
+                    ["Options", Variant("s", "bind")],
+                    [
+                        "Description",
+                        Variant("s", "Supervisor bind mount: bind_media_test"),
+                    ],
+                    ["What", Variant("s", "/mnt/data/supervisor/mounts/media_test")],
+                ],
+                [],
+            ),
+        ],
+    ) == ([], [])
 
 
 async def test_load_share_mount(
@@ -311,7 +318,7 @@ async def test_mount_failed_during_load(
         "mnt-data-supervisor-media-media_test.mount",
         "fail",
         [
-            ["Options", Variant("s", "bind")],
+            ["Options", Variant("s", "ro,bind")],
             [
                 "Description",
                 Variant("s", "Supervisor bind mount: emergency_media_test"),
@@ -328,6 +335,7 @@ async def test_create_mount(
     tmp_supervisor_data,
     path_extern,
     mount_propagation,
+    mock_is_mount,
 ):
     """Test creating a mount."""
     systemd_service: SystemdService = all_dbus_services["systemd"]
@@ -459,11 +467,15 @@ async def test_remove_reload_mount_missing(coresys: CoreSys, mount_propagation):
 
 
 async def test_save_data(
-    coresys: CoreSys, tmp_supervisor_data: Path, path_extern, mount_propagation
+    coresys: CoreSys,
+    tmp_supervisor_data: Path,
+    path_extern,
+    mount_propagation,
+    mock_is_mount,
 ):
     """Test saving mount config data."""
     # Replace mount manager with one that doesn't have save_data mocked
-    coresys._mounts = MountManager(coresys)  # pylint: disable=protected-access
+    coresys._mounts = await MountManager(coresys).load_config()  # pylint: disable=protected-access
 
     path = tmp_supervisor_data / "mounts.json"
     assert not path.exists()
@@ -483,7 +495,7 @@ async def test_save_data(
             },
         )
     )
-    coresys.mounts.save_data()
+    await coresys.mounts.save_data()
 
     assert path.exists()
     with path.open() as file:
@@ -498,6 +510,7 @@ async def test_save_data(
                 "share": "backups",
                 "username": "admin",
                 "password": "password",
+                "read_only": False,
             }
         ]
 
@@ -589,10 +602,6 @@ async def test_reload_mounts(
     assert len(coresys.resolution.suggestions_for_issue(mount.failed_issue)) == 2
     assert len(systemd_service.ReloadOrRestartUnit.calls) == 1
 
-    # This shouldn't reload the mount again since this isn't a new failure
-    await coresys.mounts.reload()
-    assert len(systemd_service.ReloadOrRestartUnit.calls) == 1
-
     # This should now remove the issue from the list
     systemd_unit_service.active_state = "active"
     await coresys.mounts.reload()
@@ -600,6 +609,49 @@ async def test_reload_mounts(
     assert mount.state == UnitActiveState.ACTIVE
     assert mount.failed_issue not in coresys.resolution.issues
     assert not coresys.resolution.suggestions_for_issue(mount.failed_issue)
+
+
+async def test_reload_mounts_attempts_initial_mount(
+    coresys: CoreSys, all_dbus_services: dict[str, DBusServiceMock], mount: Mount
+):
+    """Test reloading mounts attempts initial mount."""
+    systemd_service: SystemdService = all_dbus_services["systemd"]
+    systemd_service.StartTransientUnit.calls.clear()
+    systemd_service.response_get_unit = [
+        ERROR_NO_UNIT,
+        "/org/freedesktop/systemd1/unit/tmp_2dyellow_2emount",
+        ERROR_NO_UNIT,
+        ERROR_NO_UNIT,
+        "/org/freedesktop/systemd1/unit/tmp_2dyellow_2emount",
+    ]
+    systemd_service.response_reload_or_restart_unit = ERROR_NO_UNIT
+    coresys.mounts.bound_mounts[0].emergency = True
+
+    await coresys.mounts.reload()
+
+    assert systemd_service.StartTransientUnit.calls == [
+        (
+            "mnt-data-supervisor-mounts-media_test.mount",
+            "fail",
+            [
+                ["Options", Variant("s", "soft,timeo=200")],
+                ["Type", Variant("s", "nfs")],
+                ["Description", Variant("s", "Supervisor nfs mount: media_test")],
+                ["What", Variant("s", "media.local:/media")],
+            ],
+            [],
+        ),
+        (
+            "mnt-data-supervisor-media-media_test.mount",
+            "fail",
+            [
+                ["Options", Variant("s", "bind")],
+                ["Description", Variant("s", "Supervisor bind mount: bind_media_test")],
+                ["What", Variant("s", "/mnt/data/supervisor/mounts/media_test")],
+            ],
+            [],
+        ),
+    ]
 
 
 @pytest.mark.parametrize("os_available", ["9.5"], indirect=True)
@@ -638,6 +690,7 @@ async def test_create_share_mount(
     tmp_supervisor_data,
     path_extern,
     mount_propagation,
+    mock_is_mount,
 ):
     """Test creating a share mount."""
     systemd_service: SystemdService = all_dbus_services["systemd"]

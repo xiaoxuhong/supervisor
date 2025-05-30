@@ -1,4 +1,5 @@
 """Init file for Supervisor add-on data."""
+
 from dataclasses import dataclass
 import errno
 import logging
@@ -10,10 +11,11 @@ from voluptuous.humanize import humanize_error
 
 from ..addons.validate import SCHEMA_ADDON_CONFIG, SCHEMA_ADDON_TRANSLATIONS
 from ..const import (
-    ATTR_LOCATON,
+    ATTR_LOCATION,
     ATTR_REPOSITORY,
     ATTR_SLUG,
     ATTR_TRANSLATIONS,
+    ATTR_VERSION_TIMESTAMP,
     FILE_SUFFIX_CONFIGURATION,
     REPOSITORY_CORE,
     REPOSITORY_LOCAL,
@@ -70,7 +72,10 @@ def _read_addon_translations(addon_path: Path) -> dict:
 
 
 def _read_git_repository(path: Path) -> ProcessedRepository | None:
-    """Process a custom repository folder."""
+    """Process a custom repository folder.
+
+    Must be run in executor.
+    """
     slug = extract_hash_from_path(path)
 
     # exists repository json
@@ -138,7 +143,9 @@ class StoreData(CoreSysAttributes):
         self.repositories = repositories
         self.addons = addons
 
-    async def _find_addons(self, path: Path, repository: dict) -> list[Path] | None:
+    async def _find_addon_configs(
+        self, path: Path, repository: dict
+    ) -> list[Path] | None:
         """Find add-ons in the path."""
 
         def _get_addons_list() -> list[Path]:
@@ -159,7 +166,9 @@ class StoreData(CoreSysAttributes):
         except OSError as err:
             suggestion = None
             if err.errno == errno.EBADMSG:
-                self.sys_resolution.unhealthy = UnhealthyReason.OSERROR_BAD_MESSAGE
+                self.sys_resolution.add_unhealthy_reason(
+                    UnhealthyReason.OSERROR_BAD_MESSAGE
+                )
             elif path.stem != StoreType.LOCAL:
                 suggestion = [SuggestionType.EXECUTE_RESET]
             self.sys_resolution.create_issue(
@@ -178,39 +187,40 @@ class StoreData(CoreSysAttributes):
         self, path: Path, repository: str
     ) -> dict[str, dict[str, Any]]:
         """Read data from add-ons folder."""
-        if not (addon_list := await self._find_addons(path, repository)):
+        if not (addon_config_list := await self._find_addon_configs(path, repository)):
             return {}
 
         def _process_addons_config() -> dict[str, dict[str, Any]]:
-            addons_config: dict[str, dict[str, Any]] = {}
-            for addon in addon_list:
+            addons: dict[str, dict[str, Any]] = {}
+            for addon_config in addon_config_list:
                 try:
-                    addon_config = read_json_or_yaml_file(addon)
+                    addon = read_json_or_yaml_file(addon_config)
                 except ConfigurationFileError:
                     _LOGGER.warning(
-                        "Can't read %s from repository %s", addon, repository
+                        "Can't read %s from repository %s", addon_config, repository
                     )
                     continue
 
                 # validate
                 try:
-                    addon_config = SCHEMA_ADDON_CONFIG(addon_config)
+                    addon = SCHEMA_ADDON_CONFIG(addon)
                 except vol.Invalid as ex:
                     _LOGGER.warning(
-                        "Can't read %s: %s", addon, humanize_error(addon_config, ex)
+                        "Can't read %s: %s", addon_config, humanize_error(addon, ex)
                     )
                     continue
 
                 # Generate slug
-                addon_slug = f"{repository}_{addon_config[ATTR_SLUG]}"
+                addon_slug = f"{repository}_{addon[ATTR_SLUG]}"
 
                 # store
-                addon_config[ATTR_REPOSITORY] = repository
-                addon_config[ATTR_LOCATON] = str(addon.parent)
-                addon_config[ATTR_TRANSLATIONS] = _read_addon_translations(addon.parent)
-                addons_config[addon_slug] = addon_config
+                addon[ATTR_REPOSITORY] = repository
+                addon[ATTR_LOCATION] = str(addon_config.parent)
+                addon[ATTR_TRANSLATIONS] = _read_addon_translations(addon_config.parent)
+                addon[ATTR_VERSION_TIMESTAMP] = addon_config.stat().st_mtime
+                addons[addon_slug] = addon
 
-            return addons_config
+            return addons
 
         return await self.sys_run_in_executor(_process_addons_config)
 

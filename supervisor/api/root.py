@@ -1,4 +1,5 @@
 """Init file for Supervisor Root RESTful API."""
+
 import asyncio
 import logging
 from typing import Any
@@ -112,3 +113,8 @@ class APIRoot(CoreSysAttributes):
         await asyncio.shield(
             asyncio.gather(self.sys_updater.reload(), self.sys_store.reload())
         )
+
+    @api_process
+    async def reload_updates(self, request: web.Request) -> None:
+        """Refresh updater update information."""
+        await self.sys_updater.reload()

@@ -1,4 +1,5 @@
 """Test evaluation base."""
+
 # pylint: disable=import-error,protected-access
 from unittest.mock import AsyncMock, patch
 
@@ -8,17 +9,17 @@ from supervisor.resolution.data import Issue, Suggestion
 from supervisor.resolution.fixups.store_execute_reload import FixupStoreExecuteReload
 
 
-async def test_fixup(coresys: CoreSys):
+async def test_fixup(coresys: CoreSys, supervisor_internet):
     """Test fixup."""
     store_execute_reload = FixupStoreExecuteReload(coresys)
 
     assert store_execute_reload.auto
 
-    coresys.resolution.suggestions = Suggestion(
-        SuggestionType.EXECUTE_RELOAD, ContextType.STORE, reference="test"
+    coresys.resolution.add_suggestion(
+        Suggestion(SuggestionType.EXECUTE_RELOAD, ContextType.STORE, reference="test")
     )
-    coresys.resolution.issues = Issue(
-        IssueType.FATAL_ERROR, ContextType.STORE, reference="test"
+    coresys.resolution.add_issue(
+        Issue(IssueType.FATAL_ERROR, ContextType.STORE, reference="test")
     )
 
     mock_repositorie = AsyncMock()

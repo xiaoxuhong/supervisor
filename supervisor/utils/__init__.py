@@ -1,4 +1,5 @@
 """Tools file for Supervisor."""
+
 import asyncio
 from functools import lru_cache
 from ipaddress import IPv4Address
@@ -7,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import socket
+import subprocess
 from tempfile import TemporaryDirectory
 from typing import Any
 
@@ -79,60 +81,76 @@ def get_message_from_exception_chain(err: Exception) -> str:
     return get_message_from_exception_chain(err.__context__)
 
 
-async def remove_folder(
+def remove_folder(
     folder: Path,
     content_only: bool = False,
-    excludes: list[str] | None = None,
-    tmp_dir: Path | None = None,
 ) -> None:
     """Remove folder and reset privileged.
 
     Is needed to avoid issue with:
         - CAP_DAC_OVERRIDE
         - CAP_DAC_READ_SEARCH
+    Must be run in executor.
     """
-    if excludes:
-        if not tmp_dir:
-            raise ValueError("tmp_dir is required if excludes are provided")
-        if not content_only:
-            raise ValueError("Cannot delete the folder if excludes are provided")
+    find_args = []
+    if content_only:
+        find_args.extend(["-mindepth", "1"])
+    try:
+        subprocess.run(
+            ["/usr/bin/find", str(folder), "-xdev", *find_args, "-delete"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            env=clean_env(),
+            text=True,
+            check=True,
+        )
+    except OSError as err:
+        _LOGGER.exception("Can't remove folder %s: %s", folder, err)
+    except subprocess.CalledProcessError as procerr:
+        _LOGGER.critical("Can't remove folder %s: %s", folder, procerr.stderr.strip())
 
-        temp = TemporaryDirectory(dir=tmp_dir)
-        temp_path = Path(temp.name)
+
+def remove_folder_with_excludes(
+    folder: Path,
+    excludes: list[str],
+    tmp_dir: Path | None = None,
+) -> None:
+    """Remove folder with excludes.
+
+    Must be run in executor.
+    """
+    with TemporaryDirectory(dir=tmp_dir) as temp_path:
+        temp_path = Path(temp_path)
         moved_files: list[Path] = []
         for item in folder.iterdir():
             if any(item.match(exclude) for exclude in excludes):
                 moved_files.append(item.rename(temp_path / item.name))
 
-    find_args = []
-    if content_only:
-        find_args.extend(["-mindepth", "1"])
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "/usr/bin/find",
-            folder,
-            "-xdev",
-            *find_args,
-            "-delete",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
-            env=clean_env(),
-        )
+        remove_folder(folder, content_only=True)
+        for item in moved_files:
+            item.rename(folder / item.name)
 
-        _, error_msg = await proc.communicate()
-    except OSError as err:
-        _LOGGER.exception("Can't remove folder %s: %s", folder, err)
-    else:
-        if proc.returncode == 0:
-            return
-        _LOGGER.error(
-            "Can't remove folder %s: %s", folder, error_msg.decode("utf-8").strip()
-        )
-    finally:
-        if excludes:
-            for item in moved_files:
-                item.rename(folder / item.name)
-            temp.cleanup()
+
+def get_latest_mtime(directory: Path) -> tuple[float, Path]:
+    """Get the last modification time of directories and files in a directory.
+
+    Must be run in an executor. The root directory is included too, this means
+    that often the root directory is returned as the last modified file if a
+    new file is created in it.
+    """
+    latest_mtime = directory.stat().st_mtime
+    latest_path = directory
+    for path in directory.rglob("*"):
+        try:
+            mtime = path.stat().st_mtime
+            if mtime > latest_mtime:
+                latest_mtime = mtime
+                latest_path = path
+        except FileNotFoundError:
+            # File might disappear between listing and stat. Parent
+            # directory modification date will flag such a change.
+            continue
+    return latest_mtime, latest_path
 
 
 def clean_env() -> dict[str, str]:

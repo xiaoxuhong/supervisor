@@ -1,4 +1,5 @@
 """Init file for Supervisor DNS RESTful API."""
+
 import asyncio
 from collections.abc import Awaitable
 import logging
@@ -26,8 +27,8 @@ from ..const import (
 from ..coresys import CoreSysAttributes
 from ..exceptions import APIError
 from ..validate import dns_server_list, version_tag
-from .const import ATTR_FALLBACK, ATTR_LLMNR, ATTR_MDNS, CONTENT_TYPE_BINARY
-from .utils import api_process, api_process_raw, api_validate
+from .const import ATTR_FALLBACK, ATTR_LLMNR, ATTR_MDNS
+from .utils import api_process, api_validate
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -77,7 +78,7 @@ class APICoreDNS(CoreSysAttributes):
         if restart_required:
             self.sys_create_task(self.sys_plugins.dns.restart())
 
-        self.sys_plugins.dns.save_data()
+        await self.sys_plugins.dns.save_data()
 
     @api_process
     async def stats(self, request: web.Request) -> dict[str, Any]:
@@ -104,11 +105,6 @@ class APICoreDNS(CoreSysAttributes):
         if version == self.sys_plugins.dns.version:
             raise APIError(f"Version {version} is already in use")
         await asyncio.shield(self.sys_plugins.dns.update(version))
-
-    @api_process_raw(CONTENT_TYPE_BINARY)
-    def logs(self, request: web.Request) -> Awaitable[bytes]:
-        """Return DNS Docker logs."""
-        return self.sys_plugins.dns.logs()
 
     @api_process
     def restart(self, request: web.Request) -> Awaitable[None]:

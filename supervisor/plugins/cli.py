@@ -2,9 +2,8 @@
 
 Code: https://github.com/home-assistant/plugin-cli
 """
-import asyncio
+
 from collections.abc import Awaitable
-from contextlib import suppress
 import logging
 import secrets
 
@@ -18,7 +17,7 @@ from ..docker.stats import DockerStats
 from ..exceptions import CliError, CliJobError, CliUpdateError, DockerError
 from ..jobs.const import JobExecutionLimit
 from ..jobs.decorator import Job
-from ..utils.sentry import capture_exception
+from ..utils.sentry import async_capture_exception
 from .base import PluginBase
 from .const import (
     FILE_HASSIO_CLI,
@@ -42,6 +41,13 @@ class PluginCli(PluginBase):
         self.instance: DockerCli = DockerCli(coresys)
 
     @property
+    def default_image(self) -> str:
+        """Return default image for cli plugin."""
+        if self.sys_updater.image_cli:
+            return self.sys_updater.image_cli
+        return super().default_image
+
+    @property
     def latest_version(self) -> AwesomeVersion | None:
         """Return version of latest cli."""
         return self.sys_updater.version_cli
@@ -51,29 +57,6 @@ class PluginCli(PluginBase):
         """Return an access token for the Supervisor API."""
         return self._data.get(ATTR_ACCESS_TOKEN)
 
-    async def install(self) -> None:
-        """Install cli."""
-        _LOGGER.info("Running setup for CLI plugin")
-        while True:
-            # read cli tag and install it
-            if not self.latest_version:
-                await self.sys_updater.reload()
-
-            if self.latest_version:
-                with suppress(DockerError):
-                    await self.instance.install(
-                        self.latest_version,
-                        image=self.sys_updater.image_cli,
-                    )
-                    break
-            _LOGGER.warning("Error on install cli plugin. Retrying in 30sec")
-            await asyncio.sleep(30)
-
-        _LOGGER.info("CLI plugin is now installed")
-        self.version = self.instance.version
-        self.image = self.sys_updater.image_cli
-        self.save_data()
-
     @Job(
         name="plugin_cli_update",
         conditions=PLUGIN_UPDATE_CONDITIONS,
@@ -81,34 +64,16 @@ class PluginCli(PluginBase):
     )
     async def update(self, version: AwesomeVersion | None = None) -> None:
         """Update local HA cli."""
-        version = version or self.latest_version
-        old_image = self.image
-
-        if version == self.version:
-            _LOGGER.warning("Version %s is already installed for CLI", version)
-            return
-
         try:
-            await self.instance.update(version, image=self.sys_updater.image_cli)
+            await super().update(version)
         except DockerError as err:
             raise CliUpdateError("CLI update failed", _LOGGER.error) from err
-
-        self.version = version
-        self.image = self.sys_updater.image_cli
-        self.save_data()
-
-        # Cleanup
-        with suppress(DockerError):
-            await self.instance.cleanup(old_image=old_image)
-
-        # Start cli
-        await self.start()
 
     async def start(self) -> None:
         """Run cli."""
         # Create new API token
         self._data[ATTR_ACCESS_TOKEN] = secrets.token_hex(56)
-        self.save_data()
+        await self.save_data()
 
         # Start Instance
         _LOGGER.info("Starting CLI plugin")
@@ -149,7 +114,7 @@ class PluginCli(PluginBase):
             await self.instance.install(self.version)
         except DockerError as err:
             _LOGGER.error("Repair of HA cli failed")
-            capture_exception(err)
+            await async_capture_exception(err)
 
     @Job(
         name="plugin_cli_restart_after_problem",

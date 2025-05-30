@@ -52,13 +52,14 @@ async def test_check(
     docker.containers.get = _make_mock_container_get(
         ["homeassistant", "hassio_audio", "addon_local_ssh"], folder
     )
+    # Use state used in setup()
+    await coresys.core.set_state(CoreState.SETUP)
     with patch.object(DockerInterface, "is_running", return_value=True):
         await coresys.plugins.load()
         await coresys.homeassistant.load()
         await coresys.addons.load()
 
     docker_config = CheckDockerConfig(coresys)
-    coresys.core.state = CoreState.RUNNING
     assert not coresys.resolution.issues
     assert not coresys.resolution.suggestions
 
@@ -131,13 +132,13 @@ async def test_did_run(coresys: CoreSys):
         return_value=None,
     ) as check:
         for state in should_run:
-            coresys.core.state = state
+            await coresys.core.set_state(state)
             await docker_config()
             check.assert_called_once()
             check.reset_mock()
 
         for state in should_not_run:
-            coresys.core.state = state
+            await coresys.core.set_state(state)
             await docker_config()
             check.assert_not_called()
             check.reset_mock()

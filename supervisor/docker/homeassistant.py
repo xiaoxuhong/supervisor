@@ -1,12 +1,14 @@
 """Init file for Supervisor Docker object."""
+
 from collections.abc import Awaitable
 from ipaddress import IPv4Address
 import logging
+import re
 
 from awesomeversion import AwesomeVersion, AwesomeVersionCompareException
 from docker.types import Mount
 
-from ..const import LABEL_MACHINE, MACHINE_ID
+from ..const import LABEL_MACHINE
 from ..exceptions import DockerJobError
 from ..hardware.const import PolicyGroup
 from ..homeassistant.const import LANDINGPAGE
@@ -20,6 +22,10 @@ from .const import (
     MOUNT_DEV,
     MOUNT_MACHINE_ID,
     MOUNT_UDEV,
+    PATH_MEDIA,
+    PATH_PUBLIC_CONFIG,
+    PATH_SHARE,
+    PATH_SSL,
     MountType,
     PropagationMode,
 )
@@ -28,6 +34,8 @@ from .interface import CommandReturn, DockerInterface
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 _VERIFY_TRUST: AwesomeVersion = AwesomeVersion("2021.5.0")
 _HASS_DOCKER_NAME: str = "homeassistant"
+ENV_S6_GRACETIME = re.compile(r"^S6_SERVICES_GRACETIME=([0-9]+)$")
+ENV_RESTORE_JOB_ID = "SUPERVISOR_RESTORE_JOB_ID"
 
 
 class DockerHomeAssistant(DockerInterface):
@@ -53,10 +61,15 @@ class DockerHomeAssistant(DockerInterface):
     @property
     def timeout(self) -> int:
         """Return timeout for Docker actions."""
-        # Synchronized with the homeassistant core container's S6_SERVICES_GRACETIME
-        # to avoid killing Home Assistant Core, see
+        # Use S6_SERVICES_GRACETIME to avoid killing Home Assistant Core, see
         # https://github.com/home-assistant/core/tree/dev/Dockerfile
-        return 240 + 20
+        if self.meta_config and "Env" in self.meta_config:
+            for env in self.meta_config["Env"]:
+                if match := ENV_S6_GRACETIME.match(env):
+                    return 20 + int(int(match.group(1)) / 1000)
+
+        # Fallback - as of 2024.3, S6 SERVICES_GRACETIME was set to 24000
+        return 260
 
     @property
     def ip_address(self) -> IPv4Address:
@@ -88,7 +101,7 @@ class DockerHomeAssistant(DockerInterface):
             Mount(
                 type=MountType.BIND,
                 source=self.sys_config.path_extern_homeassistant.as_posix(),
-                target="/config",
+                target=PATH_PUBLIC_CONFIG.as_posix(),
                 read_only=False,
             ),
         ]
@@ -101,20 +114,20 @@ class DockerHomeAssistant(DockerInterface):
                     Mount(
                         type=MountType.BIND,
                         source=self.sys_config.path_extern_ssl.as_posix(),
-                        target="/ssl",
+                        target=PATH_SSL.as_posix(),
                         read_only=True,
                     ),
                     Mount(
                         type=MountType.BIND,
                         source=self.sys_config.path_extern_share.as_posix(),
-                        target="/share",
+                        target=PATH_SHARE.as_posix(),
                         read_only=False,
                         propagation=PropagationMode.RSLAVE.value,
                     ),
                     Mount(
                         type=MountType.BIND,
                         source=self.sys_config.path_extern_media.as_posix(),
-                        target="/media",
+                        target=PATH_MEDIA.as_posix(),
                         read_only=False,
                         propagation=PropagationMode.RSLAVE.value,
                     ),
@@ -141,7 +154,7 @@ class DockerHomeAssistant(DockerInterface):
             )
 
         # Machine ID
-        if MACHINE_ID.exists():
+        if self.sys_machine_id:
             mounts.append(MOUNT_MACHINE_ID)
 
         return mounts
@@ -151,8 +164,17 @@ class DockerHomeAssistant(DockerInterface):
         limit=JobExecutionLimit.GROUP_ONCE,
         on_condition=DockerJobError,
     )
-    async def run(self) -> None:
+    async def run(self, *, restore_job_id: str | None = None) -> None:
         """Run Docker image."""
+        environment = {
+            "SUPERVISOR": self.sys_docker.network.supervisor,
+            "HASSIO": self.sys_docker.network.supervisor,
+            ENV_TIME: self.sys_timezone,
+            ENV_TOKEN: self.sys_homeassistant.supervisor_token,
+            ENV_TOKEN_OLD: self.sys_homeassistant.supervisor_token,
+        }
+        if restore_job_id:
+            environment[ENV_RESTORE_JOB_ID] = restore_job_id
         await self._run(
             tag=(self.sys_homeassistant.version),
             name=self.name,
@@ -168,14 +190,8 @@ class DockerHomeAssistant(DockerInterface):
                 "supervisor": self.sys_docker.network.supervisor,
                 "observer": self.sys_docker.network.observer,
             },
-            environment={
-                "SUPERVISOR": self.sys_docker.network.supervisor,
-                "HASSIO": self.sys_docker.network.supervisor,
-                ENV_TIME: self.sys_timezone,
-                ENV_TOKEN: self.sys_homeassistant.supervisor_token,
-                ENV_TOKEN_OLD: self.sys_homeassistant.supervisor_token,
-            },
-            tmpfs={"/tmp": ""},
+            environment=environment,
+            tmpfs={"/tmp": ""},  # noqa: S108
             oom_score_adj=-300,
         )
         _LOGGER.info(
@@ -232,14 +248,12 @@ class DockerHomeAssistant(DockerInterface):
             self.sys_homeassistant.version,
         )
 
-    async def _validate_trust(
-        self, image_id: str, image: str, version: AwesomeVersion
-    ) -> None:
+    async def _validate_trust(self, image_id: str) -> None:
         """Validate trust of content."""
         try:
-            if version != LANDINGPAGE and version < _VERIFY_TRUST:
+            if self.version in {None, LANDINGPAGE} or self.version < _VERIFY_TRUST:
                 return
         except AwesomeVersionCompareException:
             return
 
-        await super()._validate_trust(image_id, image, version)
+        await super()._validate_trust(image_id)

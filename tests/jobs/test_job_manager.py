@@ -1,11 +1,10 @@
 """Test the condition decorators."""
 
 import asyncio
-from unittest.mock import ANY
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 
-# pylint: disable=protected-access,import-error
 from supervisor.coresys import CoreSys
 from supervisor.exceptions import JobStartException
 
@@ -51,9 +50,8 @@ async def test_job_done(coresys: CoreSys):
     assert not coresys.jobs.is_job
     assert job.done
 
-    with pytest.raises(JobStartException):
-        with job.start():
-            pass
+    with pytest.raises(JobStartException), job.start():
+        pass
 
 
 async def test_job_start_bad_parent(coresys: CoreSys):
@@ -61,10 +59,8 @@ async def test_job_start_bad_parent(coresys: CoreSys):
     job = coresys.jobs.new_job(TEST_JOB)
     job2 = coresys.jobs.new_job(f"{TEST_JOB}_2")
 
-    with job.start():
-        with pytest.raises(JobStartException):
-            with job2.start():
-                pass
+    with job.start(), pytest.raises(JobStartException), job2.start():
+        pass
 
     with job2.start():
         assert coresys.jobs.current == job2
@@ -87,13 +83,14 @@ async def test_update_job(coresys: CoreSys):
         job.progress = -10
 
 
-async def test_notify_on_change(coresys: CoreSys):
+async def test_notify_on_change(coresys: CoreSys, ha_ws_client: AsyncMock):
     """Test jobs notify Home Assistant on changes."""
     job = coresys.jobs.new_job(TEST_JOB)
 
     job.progress = 50
     await asyncio.sleep(0)
-    coresys.homeassistant.websocket._client.async_send_command.assert_called_with(
+    # pylint: disable=protected-access
+    ha_ws_client.async_send_command.assert_called_with(
         {
             "type": "supervisor/event",
             "data": {
@@ -106,6 +103,8 @@ async def test_notify_on_change(coresys: CoreSys):
                     "stage": None,
                     "done": None,
                     "parent_id": None,
+                    "errors": [],
+                    "created": ANY,
                 },
             },
         }
@@ -113,7 +112,7 @@ async def test_notify_on_change(coresys: CoreSys):
 
     job.stage = "test"
     await asyncio.sleep(0)
-    coresys.homeassistant.websocket._client.async_send_command.assert_called_with(
+    ha_ws_client.async_send_command.assert_called_with(
         {
             "type": "supervisor/event",
             "data": {
@@ -126,6 +125,8 @@ async def test_notify_on_change(coresys: CoreSys):
                     "stage": "test",
                     "done": None,
                     "parent_id": None,
+                    "errors": [],
+                    "created": ANY,
                 },
             },
         }
@@ -133,7 +134,7 @@ async def test_notify_on_change(coresys: CoreSys):
 
     job.reference = "test"
     await asyncio.sleep(0)
-    coresys.homeassistant.websocket._client.async_send_command.assert_called_with(
+    ha_ws_client.async_send_command.assert_called_with(
         {
             "type": "supervisor/event",
             "data": {
@@ -146,6 +147,8 @@ async def test_notify_on_change(coresys: CoreSys):
                     "stage": "test",
                     "done": None,
                     "parent_id": None,
+                    "errors": [],
+                    "created": ANY,
                 },
             },
         }
@@ -153,7 +156,7 @@ async def test_notify_on_change(coresys: CoreSys):
 
     with job.start():
         await asyncio.sleep(0)
-        coresys.homeassistant.websocket._client.async_send_command.assert_called_with(
+        ha_ws_client.async_send_command.assert_called_with(
             {
                 "type": "supervisor/event",
                 "data": {
@@ -166,13 +169,43 @@ async def test_notify_on_change(coresys: CoreSys):
                         "stage": "test",
                         "done": False,
                         "parent_id": None,
+                        "errors": [],
+                        "created": ANY,
+                    },
+                },
+            }
+        )
+
+        job.capture_error()
+        await asyncio.sleep(0)
+        ha_ws_client.async_send_command.assert_called_with(
+            {
+                "type": "supervisor/event",
+                "data": {
+                    "event": "job",
+                    "data": {
+                        "name": TEST_JOB,
+                        "reference": "test",
+                        "uuid": ANY,
+                        "progress": 50,
+                        "stage": "test",
+                        "done": False,
+                        "parent_id": None,
+                        "errors": [
+                            {
+                                "type": "HassioError",
+                                "message": "Unknown error, see supervisor logs",
+                                "stage": "test",
+                            }
+                        ],
+                        "created": ANY,
                     },
                 },
             }
         )
 
     await asyncio.sleep(0)
-    coresys.homeassistant.websocket._client.async_send_command.assert_called_with(
+    ha_ws_client.async_send_command.assert_called_with(
         {
             "type": "supervisor/event",
             "data": {
@@ -185,7 +218,16 @@ async def test_notify_on_change(coresys: CoreSys):
                     "stage": "test",
                     "done": True,
                     "parent_id": None,
+                    "errors": [
+                        {
+                            "type": "HassioError",
+                            "message": "Unknown error, see supervisor logs",
+                            "stage": "test",
+                        }
+                    ],
+                    "created": ANY,
                 },
             },
         }
     )
+    # pylint: enable=protected-access

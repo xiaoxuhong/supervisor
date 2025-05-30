@@ -1,12 +1,14 @@
 """Yellow board management."""
 
 import asyncio
+from collections.abc import Awaitable
 
 from dbus_fast.aio.message_bus import MessageBus
 
 from ....const import ATTR_DISK_LED, ATTR_HEARTBEAT_LED, ATTR_POWER_LED
 from ...const import DBUS_ATTR_DISK_LED, DBUS_ATTR_HEARTBEAT_LED, DBUS_ATTR_POWER_LED
 from ...interface import dbus_property
+from ...utils import dbus_connected
 from .const import BOARD_NAME_YELLOW
 from .interface import BoardProxy
 from .validate import SCHEMA_YELLOW_BOARD
@@ -25,11 +27,11 @@ class Yellow(BoardProxy):
         """Get heartbeat LED enabled."""
         return self.properties[DBUS_ATTR_HEARTBEAT_LED]
 
-    @heartbeat_led.setter
-    def heartbeat_led(self, enabled: bool) -> None:
+    @dbus_connected
+    def set_heartbeat_led(self, enabled: bool) -> Awaitable[None]:
         """Enable/disable heartbeat LED."""
         self._data[ATTR_HEARTBEAT_LED] = enabled
-        asyncio.create_task(self.dbus.Boards.Yellow.set_heartbeat_led(enabled))
+        return self.connected_dbus.Boards.Yellow.set("heartbeat_led", enabled)
 
     @property
     @dbus_property
@@ -37,11 +39,11 @@ class Yellow(BoardProxy):
         """Get power LED enabled."""
         return self.properties[DBUS_ATTR_POWER_LED]
 
-    @power_led.setter
-    def power_led(self, enabled: bool) -> None:
+    @dbus_connected
+    def set_power_led(self, enabled: bool) -> Awaitable[None]:
         """Enable/disable power LED."""
         self._data[ATTR_POWER_LED] = enabled
-        asyncio.create_task(self.dbus.Boards.Yellow.set_power_led(enabled))
+        return self.connected_dbus.Boards.Yellow.set("power_led", enabled)
 
     @property
     @dbus_property
@@ -49,17 +51,19 @@ class Yellow(BoardProxy):
         """Get disk LED enabled."""
         return self.properties[DBUS_ATTR_DISK_LED]
 
-    @disk_led.setter
-    def disk_led(self, enabled: bool) -> None:
+    @dbus_connected
+    def set_disk_led(self, enabled: bool) -> Awaitable[None]:
         """Enable/disable disk LED."""
         self._data[ATTR_DISK_LED] = enabled
-        asyncio.create_task(self.dbus.Boards.Yellow.set_disk_led(enabled))
+        return self.connected_dbus.Boards.Yellow.set("disk_led", enabled)
 
     async def connect(self, bus: MessageBus) -> None:
         """Connect to D-Bus."""
         await super().connect(bus)
 
         # Set LEDs based on settings on connect
-        self.disk_led = self._data[ATTR_DISK_LED]
-        self.heartbeat_led = self._data[ATTR_HEARTBEAT_LED]
-        self.power_led = self._data[ATTR_POWER_LED]
+        await asyncio.gather(
+            self.set_disk_led(self._data[ATTR_DISK_LED]),
+            self.set_heartbeat_led(self._data[ATTR_HEARTBEAT_LED]),
+            self.set_power_led(self._data[ATTR_POWER_LED]),
+        )

@@ -1,4 +1,5 @@
 """Test OSAgent dbus interface."""
+
 # pylint: disable=import-error
 from dbus_fast.aio.message_bus import MessageBus
 import pytest
@@ -12,7 +13,7 @@ from tests.dbus_service_mocks.os_agent import OSAgent as OSAgentService
 
 @pytest.fixture(name="os_agent_service")
 async def fixture_os_agent_service(
-    os_agent_services: dict[str, DBusServiceMock]
+    os_agent_services: dict[str, DBusServiceMock],
 ) -> OSAgentService:
     """Mock OS Agent dbus service."""
     yield os_agent_services["os_agent"]
@@ -43,15 +44,24 @@ async def test_dbus_osagent(
 
 
 @pytest.mark.parametrize(
-    "skip_service",
+    "skip_service,error",
     [
-        "os_agent",
-        "agent_apparmor",
-        "agent_datadisk",
+        ("os_agent", "No OS-Agent support on the host"),
+        (
+            "agent_apparmor",
+            "Can't load OS Agent dbus interface io.hass.os /io/hass/os/AppArmor",
+        ),
+        (
+            "agent_datadisk",
+            "Can't load OS Agent dbus interface io.hass.os /io/hass/os/DataDisk",
+        ),
     ],
 )
 async def test_dbus_osagent_connect_error(
-    skip_service: str, dbus_session_bus: MessageBus, caplog: pytest.LogCaptureFixture
+    skip_service: str,
+    error: str,
+    dbus_session_bus: MessageBus,
+    caplog: pytest.LogCaptureFixture,
 ):
     """Test OS Agent errors during connect."""
     os_agent_services = {
@@ -59,6 +69,7 @@ async def test_dbus_osagent_connect_error(
         "agent_apparmor": None,
         "agent_cgroup": None,
         "agent_datadisk": None,
+        "agent_swap": None,
         "agent_system": None,
         "agent_boards": None,
         "agent_boards_yellow": None,
@@ -72,4 +83,4 @@ async def test_dbus_osagent_connect_error(
     os_agent = OSAgent()
     await os_agent.connect(dbus_session_bus)
 
-    assert "No OS-Agent support on the host" in caplog.text
+    assert error in caplog.text

@@ -2,8 +2,7 @@
 
 Code: https://github.com/home-assistant/plugin-audio
 """
-import asyncio
-from contextlib import suppress
+
 import errno
 import logging
 from pathlib import Path, PurePath
@@ -28,7 +27,7 @@ from ..jobs.const import JobExecutionLimit
 from ..jobs.decorator import Job
 from ..resolution.const import UnhealthyReason
 from ..utils.json import write_json_file
-from ..utils.sentry import capture_exception
+from ..utils.sentry import async_capture_exception
 from .base import PluginBase
 from .const import (
     FILE_HASSIO_AUDIO,
@@ -73,6 +72,13 @@ class PluginAudio(PluginBase):
         return Path(self.sys_config.path_audio, "pulse_audio.json")
 
     @property
+    def default_image(self) -> str:
+        """Return default image for audio plugin."""
+        if self.sys_updater.image_audio:
+            return self.sys_updater.image_audio
+        return super().default_image
+
+    @property
     def latest_version(self) -> AwesomeVersion | None:
         """Return latest version of Audio."""
         return self.sys_updater.version_audio
@@ -82,11 +88,15 @@ class PluginAudio(PluginBase):
         # Initialize Client Template
         try:
             self.client_template = jinja2.Template(
-                PULSE_CLIENT_TMPL.read_text(encoding="utf-8")
+                await self.sys_run_in_executor(
+                    PULSE_CLIENT_TMPL.read_text, encoding="utf-8"
+                )
             )
         except OSError as err:
             if err.errno == errno.EBADMSG:
-                self.sys_resolution.unhealthy = UnhealthyReason.OSERROR_BAD_MESSAGE
+                self.sys_resolution.add_unhealthy_reason(
+                    UnhealthyReason.OSERROR_BAD_MESSAGE
+                )
 
             _LOGGER.error("Can't read pulse-client.tmpl: %s", err)
 
@@ -94,35 +104,19 @@ class PluginAudio(PluginBase):
 
         # Setup default asound config
         asound = self.sys_config.path_audio.joinpath("asound")
-        if not asound.exists():
-            try:
+
+        def setup_default_asound():
+            if not asound.exists():
                 shutil.copy(ASOUND_TMPL, asound)
-            except OSError as err:
-                if err.errno == errno.EBADMSG:
-                    self.sys_resolution.unhealthy = UnhealthyReason.OSERROR_BAD_MESSAGE
-                _LOGGER.error("Can't create default asound: %s", err)
 
-    async def install(self) -> None:
-        """Install Audio."""
-        _LOGGER.info("Setup Audio plugin")
-        while True:
-            # read audio tag and install it
-            if not self.latest_version:
-                await self.sys_updater.reload()
-
-            if self.latest_version:
-                with suppress(DockerError):
-                    await self.instance.install(
-                        self.latest_version, image=self.sys_updater.image_audio
-                    )
-                    break
-            _LOGGER.warning("Error on installing Audio plugin, retrying in 30sec")
-            await asyncio.sleep(30)
-
-        _LOGGER.info("Audio plugin now installed")
-        self.version = self.instance.version
-        self.image = self.sys_updater.image_audio
-        self.save_data()
+        try:
+            await self.sys_run_in_executor(setup_default_asound)
+        except OSError as err:
+            if err.errno == errno.EBADMSG:
+                self.sys_resolution.add_unhealthy_reason(
+                    UnhealthyReason.OSERROR_BAD_MESSAGE
+                )
+            _LOGGER.error("Can't create default asound: %s", err)
 
     @Job(
         name="plugin_audio_update",
@@ -131,33 +125,15 @@ class PluginAudio(PluginBase):
     )
     async def update(self, version: str | None = None) -> None:
         """Update Audio plugin."""
-        version = version or self.latest_version
-        old_image = self.image
-
-        if version == self.version:
-            _LOGGER.warning("Version %s is already installed for Audio", version)
-            return
-
         try:
-            await self.instance.update(version, image=self.sys_updater.image_audio)
+            await super().update(version)
         except DockerError as err:
             raise AudioUpdateError("Audio update failed", _LOGGER.error) from err
-
-        self.version = version
-        self.image = self.sys_updater.image_audio
-        self.save_data()
-
-        # Cleanup
-        with suppress(DockerError):
-            await self.instance.cleanup(old_image=old_image)
-
-        # Start Audio
-        await self.start()
 
     async def restart(self) -> None:
         """Restart Audio plugin."""
         _LOGGER.info("Restarting Audio plugin")
-        self._write_config()
+        await self._write_config()
         try:
             await self.instance.restart()
         except DockerError as err:
@@ -166,7 +142,7 @@ class PluginAudio(PluginBase):
     async def start(self) -> None:
         """Run Audio plugin."""
         _LOGGER.info("Starting Audio plugin")
-        self._write_config()
+        await self._write_config()
         try:
             await self.instance.run()
         except DockerError as err:
@@ -197,7 +173,7 @@ class PluginAudio(PluginBase):
             await self.instance.install(self.version)
         except DockerError as err:
             _LOGGER.error("Repair of Audio failed")
-            capture_exception(err)
+            await async_capture_exception(err)
 
     def pulse_client(self, input_profile=None, output_profile=None) -> str:
         """Generate an /etc/pulse/client.conf data."""
@@ -211,10 +187,11 @@ class PluginAudio(PluginBase):
             default_sink=output_profile,
         )
 
-    def _write_config(self):
+    async def _write_config(self):
         """Write pulse audio config."""
         try:
-            write_json_file(
+            await self.sys_run_in_executor(
+                write_json_file,
                 self.pulse_audio_config,
                 {
                     "debug": self.sys_config.logging == LogLevel.DEBUG,

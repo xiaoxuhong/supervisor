@@ -9,15 +9,14 @@ from dbus_fast.service import PropertyAccess, dbus_property, signal
 from .base import DBusServiceMock, dbus_method
 
 BUS_NAME = "org.freedesktop.NetworkManager"
-DEFAULT_OBJECT_PATH = "/org/freedesktop/NetworkManager/Devices/1"
+ETHERNET_DEVICE_OBJECT_PATH = "/org/freedesktop/NetworkManager/Devices/1"
+WIRELESS_DEVICE_OBJECT_PATH = "/org/freedesktop/NetworkManager/Devices/3"
+DEFAULT_OBJECT_PATH = ETHERNET_DEVICE_OBJECT_PATH
 
 
 def setup(object_path: str | None = None) -> DBusServiceMock:
     """Create dbus mock object."""
     return Device(object_path if object_path else DEFAULT_OBJECT_PATH)
-
-
-# pylint: disable=invalid-name
 
 
 @dataclass(slots=True)
@@ -115,7 +114,7 @@ FIXTURES: dict[str, DeviceFixture] = {
         FirmwareMissing=False,
         NmPluginMissing=False,
         DeviceType=2,
-        AvailableConnections=[],
+        AvailableConnections=["/org/freedesktop/NetworkManager/Settings/3"],
         PhysicalPortId="",
         Mtu=1500,
         Metered=0,

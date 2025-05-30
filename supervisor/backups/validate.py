@@ -1,4 +1,5 @@
 """Validate some things around restore."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -15,6 +16,7 @@ from ..const import (
     ATTR_DAYS_UNTIL_STALE,
     ATTR_DOCKER,
     ATTR_EXCLUDE_DATABASE,
+    ATTR_EXTRA,
     ATTR_FOLDERS,
     ATTR_HOMEASSISTANT,
     ATTR_NAME,
@@ -53,7 +55,7 @@ def unique_addons(addons_list):
 
 
 def v1_homeassistant(
-    homeassistant_data: dict[str, Any] | None
+    homeassistant_data: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     """Cleanup homeassistant artefacts from v1."""
     if not homeassistant_data:
@@ -131,6 +133,7 @@ SCHEMA_BACKUP = vol.Schema(
             unique_addons,
         ),
         vol.Optional(ATTR_REPOSITORIES, default=list): repositories,
+        vol.Optional(ATTR_EXTRA, default=dict): dict,
     },
     extra=vol.ALLOW_EXTRA,
 )

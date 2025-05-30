@@ -1,13 +1,17 @@
 """Init file for Supervisor add-ons."""
+
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
+from datetime import datetime
 import logging
 from pathlib import Path
 from typing import Any
 
 from awesomeversion import AwesomeVersion, AwesomeVersionException
+
+from supervisor.utils.dt import utc_from_timestamp
 
 from ..const import (
     ATTR_ADVANCED,
@@ -43,7 +47,7 @@ from ..const import (
     ATTR_JOURNALD,
     ATTR_KERNEL_MODULES,
     ATTR_LEGACY,
-    ATTR_LOCATON,
+    ATTR_LOCATION,
     ATTR_MACHINE,
     ATTR_MAP,
     ATTR_NAME,
@@ -71,6 +75,7 @@ from ..const import (
     ATTR_URL,
     ATTR_USB,
     ATTR_VERSION,
+    ATTR_VERSION_TIMESTAMP,
     ATTR_VIDEO,
     ATTR_WATCHDOG,
     ATTR_WEBUI,
@@ -78,6 +83,7 @@ from ..const import (
     SECURITY_DISABLE,
     SECURITY_PROFILE,
     AddonBoot,
+    AddonBootConfig,
     AddonStage,
     AddonStartup,
 )
@@ -90,6 +96,7 @@ from ..utils import version_is_new_enough
 from .configuration import FolderMapping
 from .const import (
     ATTR_BACKUP,
+    ATTR_BREAKING_VERSIONS,
     ATTR_CODENOTARY,
     ATTR_PATH,
     ATTR_READ_ONLY,
@@ -113,6 +120,10 @@ class AddonModel(JobGroup, ABC):
             coresys, JOB_GROUP_ADDON.format_map(defaultdict(str, slug=slug)), slug
         )
         self.slug: str = slug
+        self._path_icon_exists: bool = False
+        self._path_logo_exists: bool = False
+        self._path_changelog_exists: bool = False
+        self._path_documentation_exists: bool = False
 
     @property
     @abstractmethod
@@ -140,9 +151,14 @@ class AddonModel(JobGroup, ABC):
         return self.data[ATTR_OPTIONS]
 
     @property
-    def boot(self) -> AddonBoot:
-        """Return boot config with prio local settings."""
+    def boot_config(self) -> AddonBootConfig:
+        """Return boot config."""
         return self.data[ATTR_BOOT]
+
+    @property
+    def boot(self) -> AddonBoot:
+        """Return boot config with prio local settings unless config is forced."""
+        return AddonBoot(self.data[ATTR_BOOT])
 
     @property
     def auto_update(self) -> bool | None:
@@ -195,18 +211,6 @@ class AddonModel(JobGroup, ABC):
         return self.data[ATTR_DESCRIPTON]
 
     @property
-    def long_description(self) -> str | None:
-        """Return README.md as long_description."""
-        readme = Path(self.path_location, "README.md")
-
-        # If readme not exists
-        if not readme.exists():
-            return None
-
-        # Return data
-        return readme.read_text(encoding="utf-8")
-
-    @property
     def repository(self) -> str:
         """Return repository of add-on."""
         return self.data[ATTR_REPOSITORY]
@@ -220,6 +224,11 @@ class AddonModel(JobGroup, ABC):
     def latest_version(self) -> AwesomeVersion:
         """Return latest version of add-on."""
         return self.data[ATTR_VERSION]
+
+    @property
+    def latest_version_timestamp(self) -> datetime:
+        """Return when latest version was first seen."""
+        return utc_from_timestamp(self.data[ATTR_VERSION_TIMESTAMP])
 
     @property
     def version(self) -> AwesomeVersion:
@@ -285,7 +294,7 @@ class AddonModel(JobGroup, ABC):
         return self.data.get(ATTR_WEBUI)
 
     @property
-    def watchdog(self) -> str | None:
+    def watchdog_url(self) -> str | None:
         """Return URL to for watchdog or None."""
         return self.data.get(ATTR_WATCHDOG)
 
@@ -501,22 +510,22 @@ class AddonModel(JobGroup, ABC):
     @property
     def with_icon(self) -> bool:
         """Return True if an icon exists."""
-        return self.path_icon.exists()
+        return self._path_icon_exists
 
     @property
     def with_logo(self) -> bool:
         """Return True if a logo exists."""
-        return self.path_logo.exists()
+        return self._path_logo_exists
 
     @property
     def with_changelog(self) -> bool:
         """Return True if a changelog exists."""
-        return self.path_changelog.exists()
+        return self._path_changelog_exists
 
     @property
     def with_documentation(self) -> bool:
         """Return True if a documentation exists."""
-        return self.path_documentation.exists()
+        return self._path_documentation_exists
 
     @property
     def supported_arch(self) -> list[str]:
@@ -560,7 +569,7 @@ class AddonModel(JobGroup, ABC):
     @property
     def path_location(self) -> Path:
         """Return path to this add-on."""
-        return Path(self.data[ATTR_LOCATON])
+        return Path(self.data[ATTR_LOCATION])
 
     @property
     def path_icon(self) -> Path:
@@ -597,7 +606,7 @@ class AddonModel(JobGroup, ABC):
         return AddonOptions(self.coresys, raw_schema, self.name, self.slug)
 
     @property
-    def schema_ui(self) -> list[dict[any, any]] | None:
+    def schema_ui(self) -> list[dict[Any, Any]] | None:
         """Create a UI schema for add-on options."""
         raw_schema = self.data[ATTR_SCHEMA]
 
@@ -619,6 +628,37 @@ class AddonModel(JobGroup, ABC):
     def codenotary(self) -> str | None:
         """Return Signer email address for CAS."""
         return self.data.get(ATTR_CODENOTARY)
+
+    @property
+    def breaking_versions(self) -> list[AwesomeVersion]:
+        """Return breaking versions of addon."""
+        return self.data[ATTR_BREAKING_VERSIONS]
+
+    async def long_description(self) -> str | None:
+        """Return README.md as long_description."""
+
+        def read_readme() -> str | None:
+            readme = Path(self.path_location, "README.md")
+
+            # If readme not exists
+            if not readme.exists():
+                return None
+
+            # Return data
+            return readme.read_text(encoding="utf-8")
+
+        return await self.sys_run_in_executor(read_readme)
+
+    def refresh_path_cache(self) -> Awaitable[None]:
+        """Refresh cache of existing paths."""
+
+        def check_paths():
+            self._path_icon_exists = self.path_icon.exists()
+            self._path_logo_exists = self.path_logo.exists()
+            self._path_changelog_exists = self.path_changelog.exists()
+            self._path_documentation_exists = self.path_documentation.exists()
+
+        return self.sys_run_in_executor(check_paths)
 
     def validate_availability(self) -> None:
         """Validate if addon is available for current system."""

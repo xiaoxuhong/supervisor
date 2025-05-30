@@ -1,5 +1,7 @@
 """Add-on Store handler."""
+
 import asyncio
+from collections.abc import Awaitable
 import logging
 
 from ..const import ATTR_REPOSITORIES, URL_HASSIO_ADDONS
@@ -73,8 +75,6 @@ class StoreManager(CoreSysAttributes, FileConfiguration):
 
     async def load(self) -> None:
         """Start up add-on management."""
-        await self.data.update()
-
         # Init custom repositories and load add-ons
         await self.update_repositories(
             self._data[ATTR_REPOSITORIES], add_with_errors=True
@@ -85,15 +85,39 @@ class StoreManager(CoreSysAttributes, FileConfiguration):
         conditions=[JobCondition.SUPERVISOR_UPDATED],
         on_condition=StoreJobError,
     )
-    async def reload(self) -> None:
+    async def reload(self, repository: Repository | None = None) -> None:
         """Update add-ons from repository and reload list."""
-        tasks = [self.sys_create_task(repository.update()) for repository in self.all]
-        if tasks:
-            await asyncio.wait(tasks)
+        # Make a copy to prevent race with other tasks
+        repositories = [repository] if repository else self.all.copy()
+        results: list[bool | Exception] = await asyncio.gather(
+            *[repo.update() for repo in repositories], return_exceptions=True
+        )
 
-        # read data from repositories
-        await self.load()
-        self._read_addons()
+        # Determine which repositories were updated
+        updated_repos: set[str] = set()
+        for i, result in enumerate(results):
+            if result is True:
+                updated_repos.add(repositories[i].slug)
+            elif result:
+                _LOGGER.error(
+                    "Could not reload repository %s due to %r",
+                    repositories[i].slug,
+                    result,
+                )
+
+        # Update path cache for all addons in updated repos
+        if updated_repos:
+            await asyncio.gather(
+                *[
+                    addon.refresh_path_cache()
+                    for addon in self.sys_addons.store.values()
+                    if addon.repository in updated_repos
+                ]
+            )
+
+            # read data from repositories
+            await self.data.update()
+            await self._read_addons()
 
     @Job(
         name="store_manager_add_repository",
@@ -159,7 +183,7 @@ class StoreManager(CoreSysAttributes, FileConfiguration):
                 raise err
 
         else:
-            if not repository.validate():
+            if not await self.sys_run_in_executor(repository.validate):
                 if add_with_errors:
                     _LOGGER.error("%s is not a valid add-on repository", url)
                     self.sys_resolution.create_issue(
@@ -180,12 +204,12 @@ class StoreManager(CoreSysAttributes, FileConfiguration):
         # On start-up we add the saved repos to force a load. But they're already in data
         if url not in self._data[ATTR_REPOSITORIES]:
             self._data[ATTR_REPOSITORIES].append(url)
-            self.save_data()
+            await self.save_data()
 
         # Persist changes
         if persist:
             await self.data.update()
-            self._read_addons()
+            await self._read_addons()
 
     async def remove_repository(self, repository: Repository, *, persist: bool = True):
         """Remove a repository."""
@@ -201,12 +225,13 @@ class StoreManager(CoreSysAttributes, FileConfiguration):
             )
         await self.repositories.pop(repository.slug).remove()
         self._data[ATTR_REPOSITORIES].remove(repository.source)
-        self.save_data()
+        await self.save_data()
 
         if persist:
             await self.data.update()
-            self._read_addons()
+            await self._read_addons()
 
+    @Job(name="store_manager_update_repositories")
     async def update_repositories(
         self,
         list_repositories: list[str],
@@ -244,14 +269,14 @@ class StoreManager(CoreSysAttributes, FileConfiguration):
 
         # Always update data, even there are errors, some changes may have succeeded
         await self.data.update()
-        self._read_addons()
+        await self._read_addons()
 
         # Raise the first error we found (if any)
         for error in add_errors + remove_errors:
             if error:
                 raise error
 
-    def _read_addons(self) -> None:
+    async def _read_addons(self) -> None:
         """Reload add-ons inside store."""
         all_addons = set(self.data.addons)
 
@@ -267,8 +292,13 @@ class StoreManager(CoreSysAttributes, FileConfiguration):
         )
 
         # new addons
-        for slug in add_addons:
-            self.sys_addons.store[slug] = AddonStore(self.coresys, slug)
+        if add_addons:
+            cache_updates: list[Awaitable[None]] = []
+            for slug in add_addons:
+                self.sys_addons.store[slug] = AddonStore(self.coresys, slug)
+                cache_updates.append(self.sys_addons.store[slug].refresh_path_cache())
+
+            await asyncio.gather(*cache_updates)
 
         # remove
         for slug in del_addons:

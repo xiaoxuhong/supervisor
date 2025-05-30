@@ -1,13 +1,17 @@
 """Home Assistant control object."""
+
 import asyncio
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 import logging
-from typing import Any, AsyncContextManager
+from typing import Any
 
 import aiohttp
 from aiohttp import hdrs
 from awesomeversion import AwesomeVersion
+from multidict import MultiMapping
 
 from ..coresys import CoreSys, CoreSysAttributes
 from ..exceptions import HomeAssistantAPIError, HomeAssistantAuthError
@@ -19,6 +23,14 @@ from .const import LANDINGPAGE
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
 GET_CORE_STATE_MIN_VERSION: AwesomeVersion = AwesomeVersion("2023.8.0.dev20230720")
+
+
+@dataclass(frozen=True)
+class APIState:
+    """Container for API state response."""
+
+    core_state: str
+    offline_db_migration: bool
 
 
 class HomeAssistantAPI(CoreSysAttributes):
@@ -40,15 +52,16 @@ class HomeAssistantAPI(CoreSysAttributes):
     async def ensure_access_token(self) -> None:
         """Ensure there is an access token."""
         if (
-            self.access_token is not None
-            and self._access_token_expires > datetime.utcnow()
+            self.access_token
+            and self._access_token_expires
+            and self._access_token_expires > datetime.now(tz=UTC)
         ):
             return
 
         with suppress(asyncio.TimeoutError, aiohttp.ClientError):
             async with self.sys_websession.post(
                 f"{self.sys_homeassistant.api_url}/auth/token",
-                timeout=30,
+                timeout=aiohttp.ClientTimeout(total=30),
                 data={
                     "grant_type": "refresh_token",
                     "refresh_token": self.sys_homeassistant.refresh_token,
@@ -63,7 +76,7 @@ class HomeAssistantAPI(CoreSysAttributes):
                 _LOGGER.info("Updated Home Assistant API token")
                 tokens = await resp.json()
                 self.access_token = tokens["access_token"]
-                self._access_token_expires = datetime.utcnow() + timedelta(
+                self._access_token_expires = datetime.now(tz=UTC) + timedelta(
                     seconds=tokens["expires_in"]
                 )
 
@@ -75,10 +88,10 @@ class HomeAssistantAPI(CoreSysAttributes):
         json: dict[str, Any] | None = None,
         content_type: str | None = None,
         data: Any = None,
-        timeout: int = 30,
-        params: dict[str, str] | None = None,
+        timeout: int | None = 30,
+        params: MultiMapping[str] | None = None,
         headers: dict[str, str] | None = None,
-    ) -> AsyncContextManager[aiohttp.ClientResponse]:
+    ) -> AsyncIterator[aiohttp.ClientResponse]:
         """Async context manager to make a request with right auth."""
         url = f"{self.sys_homeassistant.api_url}/{path}"
         headers = headers or {}
@@ -107,7 +120,10 @@ class HomeAssistantAPI(CoreSysAttributes):
                         continue
                     yield resp
                     return
-            except (TimeoutError, aiohttp.ClientError) as err:
+            except TimeoutError:
+                _LOGGER.error("Timeout on call %s.", url)
+                break
+            except aiohttp.ClientError as err:
                 _LOGGER.error("Error on call %s: %s", url, err)
                 break
 
@@ -130,7 +146,7 @@ class HomeAssistantAPI(CoreSysAttributes):
         """Return Home Assistant core state."""
         return await self._get_json("api/core/state")
 
-    async def get_api_state(self) -> str | None:
+    async def get_api_state(self) -> APIState | None:
         """Return state of Home Assistant Core or None."""
         # Skip check on landingpage
         if (
@@ -159,12 +175,17 @@ class HomeAssistantAPI(CoreSysAttributes):
                 data = await self.get_config()
             # Older versions of home assistant does not expose the state
             if data:
-                return data.get("state", "RUNNING")
+                state = data.get("state", "RUNNING")
+                # Recorder state was added in HA Core 2024.8
+                recorder_state = data.get("recorder_state", {})
+                migrating = recorder_state.get("migration_in_progress", False)
+                live_migration = recorder_state.get("migration_is_live", False)
+                return APIState(state, migrating and not live_migration)
 
         return None
 
     async def check_api_state(self) -> bool:
         """Return Home Assistant Core state if up."""
         if state := await self.get_api_state():
-            return state == "RUNNING"
+            return state.core_state == "RUNNING" or state.offline_db_migration
         return False

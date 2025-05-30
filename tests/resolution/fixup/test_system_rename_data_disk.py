@@ -1,4 +1,5 @@
 """Test system fixup rename data disk."""
+
 # pylint: disable=import-error
 from dbus_fast import Variant
 import pytest
@@ -19,7 +20,7 @@ from tests.dbus_service_mocks.udisks2_manager import (
 
 @pytest.fixture(name="sda1_filesystem_service")
 async def fixture_sda1_filesystem_service(
-    udisks2_services: dict[str, DBusServiceMock | dict[str, DBusServiceMock]]
+    udisks2_services: dict[str, DBusServiceMock | dict[str, DBusServiceMock]],
 ) -> FilesystemService:
     """Return sda1 filesystem service."""
     return udisks2_services["udisks2_filesystem"][
@@ -29,7 +30,7 @@ async def fixture_sda1_filesystem_service(
 
 @pytest.fixture(name="udisks2_service")
 async def fixture_udisks2_service(
-    udisks2_services: dict[str, DBusServiceMock | dict[str, DBusServiceMock]]
+    udisks2_services: dict[str, DBusServiceMock | dict[str, DBusServiceMock]],
 ) -> UDisks2ManagerService:
     """Return udisks2 manager service."""
     return udisks2_services["udisks2_manager"]
@@ -42,17 +43,23 @@ async def test_fixup(coresys: CoreSys, sda1_filesystem_service: FilesystemServic
 
     assert not system_rename_data_disk.auto
 
-    coresys.resolution.suggestions = Suggestion(
-        SuggestionType.RENAME_DATA_DISK, ContextType.SYSTEM, reference="/dev/sda1"
+    coresys.resolution.add_suggestion(
+        Suggestion(
+            SuggestionType.RENAME_DATA_DISK, ContextType.SYSTEM, reference="/dev/sda1"
+        )
     )
-    coresys.resolution.issues = Issue(
-        IssueType.MULTIPLE_DATA_DISKS, ContextType.SYSTEM, reference="/dev/sda1"
+    coresys.resolution.add_issue(
+        Issue(IssueType.MULTIPLE_DATA_DISKS, ContextType.SYSTEM, reference="/dev/sda1")
     )
 
     await system_rename_data_disk()
 
     assert sda1_filesystem_service.SetLabel.calls == [
-        ("hassos-data-old", {"auth.no_user_interaction": Variant("b", True)})
+        (
+            "/org/freedesktop/UDisks2/block_devices/sda1",
+            "hassos-data-old",
+            {"auth.no_user_interaction": Variant("b", True)},
+        )
     ]
     assert len(coresys.resolution.suggestions) == 0
     assert len(coresys.resolution.issues) == 0
@@ -68,11 +75,13 @@ async def test_fixup_device_removed(
 
     assert not system_rename_data_disk.auto
 
-    coresys.resolution.suggestions = Suggestion(
-        SuggestionType.RENAME_DATA_DISK, ContextType.SYSTEM, reference="/dev/sda1"
+    coresys.resolution.add_suggestion(
+        Suggestion(
+            SuggestionType.RENAME_DATA_DISK, ContextType.SYSTEM, reference="/dev/sda1"
+        )
     )
-    coresys.resolution.issues = Issue(
-        IssueType.MULTIPLE_DATA_DISKS, ContextType.SYSTEM, reference="/dev/sda1"
+    coresys.resolution.add_issue(
+        Issue(IssueType.MULTIPLE_DATA_DISKS, ContextType.SYSTEM, reference="/dev/sda1")
     )
 
     udisks2_service.resolved_devices = []
@@ -93,11 +102,13 @@ async def test_fixup_device_not_filesystem(
 
     assert not system_rename_data_disk.auto
 
-    coresys.resolution.suggestions = Suggestion(
-        SuggestionType.RENAME_DATA_DISK, ContextType.SYSTEM, reference="/dev/sda1"
+    coresys.resolution.add_suggestion(
+        Suggestion(
+            SuggestionType.RENAME_DATA_DISK, ContextType.SYSTEM, reference="/dev/sda1"
+        )
     )
-    coresys.resolution.issues = Issue(
-        IssueType.MULTIPLE_DATA_DISKS, ContextType.SYSTEM, reference="/dev/sda1"
+    coresys.resolution.add_issue(
+        Issue(IssueType.MULTIPLE_DATA_DISKS, ContextType.SYSTEM, reference="/dev/sda1")
     )
 
     udisks2_service.resolved_devices = ["/org/freedesktop/UDisks2/block_devices/sda"]

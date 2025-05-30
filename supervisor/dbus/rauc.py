@@ -1,6 +1,8 @@
 """D-Bus interface for rauc."""
+
+from ctypes import c_uint32, c_uint64
 import logging
-from typing import Any
+from typing import Any, NotRequired, TypedDict
 
 from dbus_fast.aio.message_bus import MessageBus
 
@@ -23,6 +25,28 @@ from .utils import dbus_connected
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
+SlotStatusDataType = TypedDict(
+    "SlotStatusDataType",
+    {
+        "class": str,
+        "type": str,
+        "state": str,
+        "device": str,
+        "bundle.compatible": NotRequired[str],
+        "sha256": NotRequired[str],
+        "size": NotRequired[c_uint64],
+        "installed.count": NotRequired[c_uint32],
+        "bundle.version": NotRequired[str],
+        "installed.timestamp": NotRequired[str],
+        "status": NotRequired[str],
+        "activated.count": NotRequired[c_uint32],
+        "activated.timestamp": NotRequired[str],
+        "boot-status": NotRequired[str],
+        "bootname": NotRequired[str],
+        "parent": NotRequired[str],
+    },
+)
+
 
 class Rauc(DBusInterfaceProxy):
     """Handle D-Bus interface for rauc."""
@@ -32,7 +56,7 @@ class Rauc(DBusInterfaceProxy):
     object_path: str = DBUS_OBJECT_BASE
     properties_interface: str = DBUS_IFACE_RAUC_INSTALLER
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize Properties."""
         super().__init__()
 
@@ -80,22 +104,22 @@ class Rauc(DBusInterfaceProxy):
     @dbus_connected
     async def install(self, raucb_file) -> None:
         """Install rauc bundle file."""
-        await self.dbus.Installer.call_install(str(raucb_file))
+        await self.connected_dbus.Installer.call("install", str(raucb_file))
 
     @dbus_connected
-    async def get_slot_status(self) -> list[tuple[str, dict[str, Any]]]:
+    async def get_slot_status(self) -> list[tuple[str, SlotStatusDataType]]:
         """Get slot status."""
-        return await self.dbus.Installer.call_get_slot_status()
+        return await self.connected_dbus.Installer.call("get_slot_status")
 
     @dbus_connected
     def signal_completed(self) -> DBusSignalWrapper:
         """Return a signal wrapper for completed signal."""
-        return self.dbus.signal(DBUS_SIGNAL_RAUC_INSTALLER_COMPLETED)
+        return self.connected_dbus.signal(DBUS_SIGNAL_RAUC_INSTALLER_COMPLETED)
 
     @dbus_connected
     async def mark(self, state: RaucState, slot_identifier: str) -> tuple[str, str]:
         """Get slot status."""
-        return await self.dbus.Installer.call_mark(state, slot_identifier)
+        return await self.connected_dbus.Installer.call("mark", state, slot_identifier)
 
     @dbus_connected
     async def update(self, changed: dict[str, Any] | None = None) -> None:

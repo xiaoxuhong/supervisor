@@ -1,4 +1,5 @@
 """Test evaluation base."""
+
 # pylint: disable=import-error,protected-access
 from datetime import timedelta
 from unittest.mock import AsyncMock
@@ -15,16 +16,16 @@ from supervisor.security.const import ContentTrustResult, IntegrityResult
 from supervisor.utils.dt import utcnow
 
 
-async def test_fixup(coresys: CoreSys):
+async def test_fixup(coresys: CoreSys, supervisor_internet: AsyncMock):
     """Test fixup."""
     system_execute_integrity = FixupSystemExecuteIntegrity(coresys)
 
     assert system_execute_integrity.auto
 
-    coresys.resolution.suggestions = Suggestion(
-        SuggestionType.EXECUTE_INTEGRITY, ContextType.SYSTEM
+    coresys.resolution.add_suggestion(
+        Suggestion(SuggestionType.EXECUTE_INTEGRITY, ContextType.SYSTEM)
     )
-    coresys.resolution.issues = Issue(IssueType.TRUST, ContextType.SYSTEM)
+    coresys.resolution.add_issue(Issue(IssueType.TRUST, ContextType.SYSTEM))
 
     coresys.security.integrity_check = AsyncMock(
         return_value=IntegrityResult(
@@ -41,16 +42,16 @@ async def test_fixup(coresys: CoreSys):
     assert len(coresys.resolution.issues) == 0
 
 
-async def test_fixup_error(coresys: CoreSys):
+async def test_fixup_error(coresys: CoreSys, supervisor_internet: AsyncMock):
     """Test fixup."""
     system_execute_integrity = FixupSystemExecuteIntegrity(coresys)
 
     assert system_execute_integrity.auto
 
-    coresys.resolution.suggestions = Suggestion(
-        SuggestionType.EXECUTE_INTEGRITY, ContextType.SYSTEM
+    coresys.resolution.add_suggestion(
+        Suggestion(SuggestionType.EXECUTE_INTEGRITY, ContextType.SYSTEM)
     )
-    coresys.resolution.issues = Issue(IssueType.TRUST, ContextType.SYSTEM)
+    coresys.resolution.add_issue(Issue(IssueType.TRUST, ContextType.SYSTEM))
 
     coresys.security.integrity_check = AsyncMock(
         return_value=IntegrityResult(

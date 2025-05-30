@@ -1,4 +1,5 @@
 """Tools handle YAML files for Supervisor."""
+
 import logging
 from pathlib import Path
 
@@ -8,7 +9,7 @@ from yaml import YAMLError, dump, load
 try:
     from yaml import CDumper as Dumper, CSafeLoader as SafeLoader
 except ImportError:
-    from yaml import SafeLoader, Dumper
+    from yaml import Dumper, SafeLoader
 
 from ..exceptions import YamlFileError
 
@@ -16,7 +17,10 @@ _LOGGER: logging.Logger = logging.getLogger(__name__)
 
 
 def read_yaml_file(path: Path) -> dict:
-    """Read YAML file from path."""
+    """Read YAML file from path.
+
+    Must be run in executor.
+    """
     try:
         with open(path, encoding="utf-8") as yaml_file:
             return load(yaml_file, Loader=SafeLoader) or {}
@@ -28,7 +32,10 @@ def read_yaml_file(path: Path) -> dict:
 
 
 def write_yaml_file(path: Path, data: dict) -> None:
-    """Write a YAML file."""
+    """Write a YAML file.
+
+    Must be run in executor.
+    """
     try:
         with atomic_write(path, overwrite=True) as fp:
             dump(data, fp, Dumper=Dumper)

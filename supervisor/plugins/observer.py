@@ -2,8 +2,7 @@
 
 Code: https://github.com/home-assistant/plugin-observer
 """
-import asyncio
-from contextlib import suppress
+
 import logging
 import secrets
 
@@ -23,7 +22,7 @@ from ..exceptions import (
 )
 from ..jobs.const import JobExecutionLimit
 from ..jobs.decorator import Job
-from ..utils.sentry import capture_exception
+from ..utils.sentry import async_capture_exception
 from .base import PluginBase
 from .const import (
     FILE_HASSIO_OBSERVER,
@@ -47,6 +46,13 @@ class PluginObserver(PluginBase):
         self.instance: DockerObserver = DockerObserver(coresys)
 
     @property
+    def default_image(self) -> str:
+        """Return default image for observer plugin."""
+        if self.sys_updater.image_observer:
+            return self.sys_updater.image_observer
+        return super().default_image
+
+    @property
     def latest_version(self) -> AwesomeVersion | None:
         """Return version of latest observer."""
         return self.sys_updater.version_observer
@@ -56,28 +62,6 @@ class PluginObserver(PluginBase):
         """Return an access token for the Observer API."""
         return self._data.get(ATTR_ACCESS_TOKEN)
 
-    async def install(self) -> None:
-        """Install observer."""
-        _LOGGER.info("Running setup for observer plugin")
-        while True:
-            # read observer tag and install it
-            if not self.latest_version:
-                await self.sys_updater.reload()
-
-            if self.latest_version:
-                with suppress(DockerError):
-                    await self.instance.install(
-                        self.latest_version, image=self.sys_updater.image_observer
-                    )
-                    break
-            _LOGGER.warning("Error on install observer plugin. Retrying in 30sec")
-            await asyncio.sleep(30)
-
-        _LOGGER.info("observer plugin now installed")
-        self.version = self.instance.version
-        self.image = self.sys_updater.image_observer
-        self.save_data()
-
     @Job(
         name="plugin_observer_update",
         conditions=PLUGIN_UPDATE_CONDITIONS,
@@ -85,35 +69,18 @@ class PluginObserver(PluginBase):
     )
     async def update(self, version: AwesomeVersion | None = None) -> None:
         """Update local HA observer."""
-        version = version or self.latest_version
-        old_image = self.image
-
-        if version == self.version:
-            _LOGGER.warning("Version %s is already installed for observer", version)
-            return
-
         try:
-            await self.instance.update(version, image=self.sys_updater.image_observer)
+            await super().update(version)
         except DockerError as err:
-            _LOGGER.error("HA observer update failed")
-            raise ObserverUpdateError() from err
-
-        self.version = version
-        self.image = self.sys_updater.image_observer
-        self.save_data()
-
-        # Cleanup
-        with suppress(DockerError):
-            await self.instance.cleanup(old_image=old_image)
-
-        # Start observer
-        await self.start()
+            raise ObserverUpdateError(
+                "HA observer update failed", _LOGGER.error
+            ) from err
 
     async def start(self) -> None:
         """Run observer."""
         # Create new API token
         self._data[ATTR_ACCESS_TOKEN] = secrets.token_hex(56)
-        self.save_data()
+        await self.save_data()
 
         # Start Instance
         _LOGGER.info("Starting observer plugin")
@@ -154,7 +121,7 @@ class PluginObserver(PluginBase):
             await self.instance.install(self.version)
         except DockerError as err:
             _LOGGER.error("Repair of HA observer failed")
-            capture_exception(err)
+            await async_capture_exception(err)
 
     @Job(
         name="plugin_observer_restart_after_problem",

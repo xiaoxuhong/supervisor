@@ -1,20 +1,23 @@
 """Init file for Supervisor RESTful API."""
+
+from dataclasses import dataclass
 from functools import partial
 import logging
 from pathlib import Path
 from typing import Any
 
-from aiohttp import web
-from aiohttp_fast_url_dispatcher import FastUrlDispatcher, attach_fast_url_dispatcher
+from aiohttp import hdrs, web
 
 from ..const import AddonState
 from ..coresys import CoreSys, CoreSysAttributes
-from ..exceptions import APIAddonNotInstalled
+from ..exceptions import APIAddonNotInstalled, HostNotSupportedError
+from ..utils.sentry import async_capture_exception
 from .addons import APIAddons
 from .audio import APIAudio
 from .auth import APIAuth
 from .backups import APIBackups
 from .cli import APICli
+from .const import CONTENT_TYPE_TEXT
 from .discovery import APIDiscovery
 from .dns import APICoreDNS
 from .docker import APIDocker
@@ -36,13 +39,21 @@ from .security import APISecurity
 from .services import APIServices
 from .store import APIStore
 from .supervisor import APISupervisor
-from .utils import api_process
+from .utils import api_process, api_process_raw
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
 
 MAX_CLIENT_SIZE: int = 1024**2 * 16
 MAX_LINE_SIZE: int = 24570
+
+
+@dataclass(slots=True, frozen=True)
+class StaticResourceConfig:
+    """Configuration for a static resource."""
+
+    prefix: str
+    path: Path
 
 
 class RestAPI(CoreSysAttributes):
@@ -65,14 +76,19 @@ class RestAPI(CoreSysAttributes):
                 "max_field_size": MAX_LINE_SIZE,
             },
         )
-        attach_fast_url_dispatcher(self.webapp, FastUrlDispatcher())
 
         # service stuff
         self._runner: web.AppRunner = web.AppRunner(self.webapp, shutdown_timeout=5)
         self._site: web.TCPSite | None = None
 
+        # share single host API handler for reuse in logging endpoints
+        self._api_host: APIHost = APIHost()
+        self._api_host.coresys = coresys
+
     async def load(self) -> None:
         """Register REST API Calls."""
+        static_resource_configs: list[StaticResourceConfig] = []
+
         self._register_addons()
         self._register_audio()
         self._register_auth()
@@ -91,7 +107,7 @@ class RestAPI(CoreSysAttributes):
         self._register_network()
         self._register_observer()
         self._register_os()
-        self._register_panel()
+        static_resource_configs.extend(self._register_panel())
         self._register_proxy()
         self._register_resolution()
         self._register_root()
@@ -100,12 +116,54 @@ class RestAPI(CoreSysAttributes):
         self._register_store()
         self._register_supervisor()
 
+        if static_resource_configs:
+
+            def process_configs() -> list[web.StaticResource]:
+                return [
+                    web.StaticResource(config.prefix, config.path)
+                    for config in static_resource_configs
+                ]
+
+            for resource in await self.sys_run_in_executor(process_configs):
+                self.webapp.router.register_resource(resource)
+
         await self.start()
+
+    def _register_advanced_logs(self, path: str, syslog_identifier: str):
+        """Register logs endpoint for a given path, returning logs for single syslog identifier."""
+
+        self.webapp.add_routes(
+            [
+                web.get(
+                    f"{path}/logs",
+                    partial(self._api_host.advanced_logs, identifier=syslog_identifier),
+                ),
+                web.get(
+                    f"{path}/logs/follow",
+                    partial(
+                        self._api_host.advanced_logs,
+                        identifier=syslog_identifier,
+                        follow=True,
+                    ),
+                ),
+                web.get(
+                    f"{path}/logs/boots/{{bootid}}",
+                    partial(self._api_host.advanced_logs, identifier=syslog_identifier),
+                ),
+                web.get(
+                    f"{path}/logs/boots/{{bootid}}/follow",
+                    partial(
+                        self._api_host.advanced_logs,
+                        identifier=syslog_identifier,
+                        follow=True,
+                    ),
+                ),
+            ]
+        )
 
     def _register_host(self) -> None:
         """Register hostcontrol functions."""
-        api_host = APIHost()
-        api_host.coresys = self.coresys
+        api_host = self._api_host
 
         self.webapp.add_routes(
             [
@@ -179,9 +237,13 @@ class RestAPI(CoreSysAttributes):
             [
                 web.get("/os/info", api_os.info),
                 web.post("/os/update", api_os.update),
+                web.get("/os/config/swap", api_os.config_swap_info),
+                web.post("/os/config/swap", api_os.config_swap_options),
                 web.post("/os/config/sync", api_os.config_sync),
                 web.post("/os/datadisk/move", api_os.migrate_data),
                 web.get("/os/datadisk/list", api_os.list_data),
+                web.post("/os/datadisk/wipe", api_os.wipe_data),
+                web.post("/os/boot-slot", api_os.set_boot_slot),
             ]
         )
 
@@ -219,6 +281,8 @@ class RestAPI(CoreSysAttributes):
                 web.get("/jobs/info", api_jobs.info),
                 web.post("/jobs/options", api_jobs.options),
                 web.post("/jobs/reset", api_jobs.reset),
+                web.get("/jobs/{uuid}", api_jobs.job_info),
+                web.delete("/jobs/{uuid}", api_jobs.remove_job),
             ]
         )
 
@@ -257,11 +321,11 @@ class RestAPI(CoreSysAttributes):
             [
                 web.get("/multicast/info", api_multicast.info),
                 web.get("/multicast/stats", api_multicast.stats),
-                web.get("/multicast/logs", api_multicast.logs),
                 web.post("/multicast/update", api_multicast.update),
                 web.post("/multicast/restart", api_multicast.restart),
             ]
         )
+        self._register_advanced_logs("/multicast", "hassio_multicast")
 
     def _register_hardware(self) -> None:
         """Register hardware functions."""
@@ -281,6 +345,9 @@ class RestAPI(CoreSysAttributes):
         api_root.coresys = self.coresys
 
         self.webapp.add_routes([web.get("/info", api_root.info)])
+        self.webapp.add_routes([web.post("/reload_updates", api_root.reload_updates)])
+
+        # Discouraged
         self.webapp.add_routes([web.post("/refresh_updates", api_root.refresh_updates)])
         self.webapp.add_routes(
             [web.get("/available_updates", api_root.available_updates)]
@@ -334,6 +401,7 @@ class RestAPI(CoreSysAttributes):
                 web.post("/auth", api_auth.auth),
                 web.post("/auth/reset", api_auth.reset),
                 web.delete("/auth/cache", api_auth.cache),
+                web.get("/auth/list", api_auth.list_users),
             ]
         )
 
@@ -347,12 +415,44 @@ class RestAPI(CoreSysAttributes):
                 web.get("/supervisor/ping", api_supervisor.ping),
                 web.get("/supervisor/info", api_supervisor.info),
                 web.get("/supervisor/stats", api_supervisor.stats),
-                web.get("/supervisor/logs", api_supervisor.logs),
                 web.post("/supervisor/update", api_supervisor.update),
                 web.post("/supervisor/reload", api_supervisor.reload),
                 web.post("/supervisor/restart", api_supervisor.restart),
                 web.post("/supervisor/options", api_supervisor.options),
                 web.post("/supervisor/repair", api_supervisor.repair),
+            ]
+        )
+
+        async def get_supervisor_logs(*args, **kwargs):
+            try:
+                return await self._api_host.advanced_logs_handler(
+                    *args, identifier="hassio_supervisor", **kwargs
+                )
+            except Exception as err:  # pylint: disable=broad-exception-caught
+                # Supervisor logs are critical, so catch everything, log the exception
+                # and try to return Docker container logs as the fallback
+                _LOGGER.exception(
+                    "Failed to get supervisor logs using advanced_logs API"
+                )
+                if not isinstance(err, HostNotSupportedError):
+                    # No need to capture HostNotSupportedError to Sentry, the cause
+                    # is known and reported to the user using the resolution center.
+                    await async_capture_exception(err)
+                kwargs.pop("follow", None)  # Follow is not supported for Docker logs
+                return await api_supervisor.logs(*args, **kwargs)
+
+        self.webapp.add_routes(
+            [
+                web.get("/supervisor/logs", get_supervisor_logs),
+                web.get(
+                    "/supervisor/logs/follow",
+                    partial(get_supervisor_logs, follow=True),
+                ),
+                web.get("/supervisor/logs/boots/{bootid}", get_supervisor_logs),
+                web.get(
+                    "/supervisor/logs/boots/{bootid}/follow",
+                    partial(get_supervisor_logs, follow=True),
+                ),
             ]
         )
 
@@ -364,7 +464,6 @@ class RestAPI(CoreSysAttributes):
         self.webapp.add_routes(
             [
                 web.get("/core/info", api_hass.info),
-                web.get("/core/logs", api_hass.logs),
                 web.get("/core/stats", api_hass.stats),
                 web.post("/core/options", api_hass.options),
                 web.post("/core/update", api_hass.update),
@@ -376,11 +475,12 @@ class RestAPI(CoreSysAttributes):
             ]
         )
 
+        self._register_advanced_logs("/core", "homeassistant")
+
         # Reroute from legacy
         self.webapp.add_routes(
             [
                 web.get("/homeassistant/info", api_hass.info),
-                web.get("/homeassistant/logs", api_hass.logs),
                 web.get("/homeassistant/stats", api_hass.stats),
                 web.post("/homeassistant/options", api_hass.options),
                 web.post("/homeassistant/restart", api_hass.restart),
@@ -391,6 +491,8 @@ class RestAPI(CoreSysAttributes):
                 web.post("/homeassistant/check", api_hass.check),
             ]
         )
+
+        self._register_advanced_logs("/homeassistant", "homeassistant")
 
     def _register_proxy(self) -> None:
         """Register Home Assistant API Proxy."""
@@ -427,21 +529,42 @@ class RestAPI(CoreSysAttributes):
 
         self.webapp.add_routes(
             [
-                web.get("/addons", api_addons.list),
+                web.get("/addons", api_addons.list_addons),
                 web.post("/addons/{addon}/uninstall", api_addons.uninstall),
                 web.post("/addons/{addon}/start", api_addons.start),
                 web.post("/addons/{addon}/stop", api_addons.stop),
                 web.post("/addons/{addon}/restart", api_addons.restart),
                 web.post("/addons/{addon}/options", api_addons.options),
+                web.post("/addons/{addon}/sys_options", api_addons.sys_options),
                 web.post(
                     "/addons/{addon}/options/validate", api_addons.options_validate
                 ),
                 web.get("/addons/{addon}/options/config", api_addons.options_config),
                 web.post("/addons/{addon}/rebuild", api_addons.rebuild),
-                web.get("/addons/{addon}/logs", api_addons.logs),
                 web.post("/addons/{addon}/stdin", api_addons.stdin),
                 web.post("/addons/{addon}/security", api_addons.security),
                 web.get("/addons/{addon}/stats", api_addons.stats),
+            ]
+        )
+
+        @api_process_raw(CONTENT_TYPE_TEXT, error_type=CONTENT_TYPE_TEXT)
+        async def get_addon_logs(request, *args, **kwargs):
+            addon = api_addons.get_addon_for_request(request)
+            kwargs["identifier"] = f"addon_{addon.slug}"
+            return await self._api_host.advanced_logs(request, *args, **kwargs)
+
+        self.webapp.add_routes(
+            [
+                web.get("/addons/{addon}/logs", get_addon_logs),
+                web.get(
+                    "/addons/{addon}/logs/follow",
+                    partial(get_addon_logs, follow=True),
+                ),
+                web.get("/addons/{addon}/logs/boots/{bootid}", get_addon_logs),
+                web.get(
+                    "/addons/{addon}/logs/boots/{bootid}/follow",
+                    partial(get_addon_logs, follow=True),
+                ),
             ]
         )
 
@@ -474,7 +597,9 @@ class RestAPI(CoreSysAttributes):
                 web.post("/ingress/session", api_ingress.create_session),
                 web.post("/ingress/validate_session", api_ingress.validate_session),
                 web.get("/ingress/panels", api_ingress.panels),
-                web.view("/ingress/{token}/{path:.*}", api_ingress.handler),
+                web.route(
+                    hdrs.METH_ANY, "/ingress/{token}/{path:.*}", api_ingress.handler
+                ),
             ]
         )
 
@@ -485,7 +610,7 @@ class RestAPI(CoreSysAttributes):
 
         self.webapp.add_routes(
             [
-                web.get("/backups", api_backups.list),
+                web.get("/backups", api_backups.list_backups),
                 web.get("/backups/info", api_backups.info),
                 web.post("/backups/options", api_backups.options),
                 web.post("/backups/reload", api_backups.reload),
@@ -512,7 +637,7 @@ class RestAPI(CoreSysAttributes):
 
         self.webapp.add_routes(
             [
-                web.get("/services", api_services.list),
+                web.get("/services", api_services.list_services),
                 web.get("/services/{service}", api_services.get_service),
                 web.post("/services/{service}", api_services.set_service),
                 web.delete("/services/{service}", api_services.del_service),
@@ -526,7 +651,7 @@ class RestAPI(CoreSysAttributes):
 
         self.webapp.add_routes(
             [
-                web.get("/discovery", api_discovery.list),
+                web.get("/discovery", api_discovery.list_discovery),
                 web.get("/discovery/{uuid}", api_discovery.get_discovery),
                 web.delete("/discovery/{uuid}", api_discovery.del_discovery),
                 web.post("/discovery", api_discovery.set_discovery),
@@ -542,7 +667,6 @@ class RestAPI(CoreSysAttributes):
             [
                 web.get("/dns/info", api_dns.info),
                 web.get("/dns/stats", api_dns.stats),
-                web.get("/dns/logs", api_dns.logs),
                 web.post("/dns/update", api_dns.update),
                 web.post("/dns/options", api_dns.options),
                 web.post("/dns/restart", api_dns.restart),
@@ -550,18 +674,17 @@ class RestAPI(CoreSysAttributes):
             ]
         )
 
+        self._register_advanced_logs("/dns", "hassio_dns")
+
     def _register_audio(self) -> None:
         """Register Audio functions."""
         api_audio = APIAudio()
         api_audio.coresys = self.coresys
-        api_host = APIHost()
-        api_host.coresys = self.coresys
 
         self.webapp.add_routes(
             [
                 web.get("/audio/info", api_audio.info),
                 web.get("/audio/stats", api_audio.stats),
-                web.get("/audio/logs", api_audio.logs),
                 web.post("/audio/update", api_audio.update),
                 web.post("/audio/restart", api_audio.restart),
                 web.post("/audio/reload", api_audio.reload),
@@ -573,6 +696,8 @@ class RestAPI(CoreSysAttributes):
                 web.post("/audio/default/{source}", api_audio.set_default),
             ]
         )
+
+        self._register_advanced_logs("/audio", "hassio_audio")
 
     def _register_mounts(self) -> None:
         """Register mounts endpoints."""
@@ -600,7 +725,6 @@ class RestAPI(CoreSysAttributes):
                 web.get("/store", api_store.store_info),
                 web.get("/store/addons", api_store.addons_list),
                 web.get("/store/addons/{addon}", api_store.addons_addon_info),
-                web.get("/store/addons/{addon}/{version}", api_store.addons_addon_info),
                 web.get("/store/addons/{addon}/icon", api_store.addons_addon_icon),
                 web.get("/store/addons/{addon}/logo", api_store.addons_addon_logo),
                 web.get(
@@ -622,6 +746,8 @@ class RestAPI(CoreSysAttributes):
                     "/store/addons/{addon}/update/{version}",
                     api_store.addons_addon_update,
                 ),
+                # Must be below others since it has a wildcard in resource path
+                web.get("/store/addons/{addon}/{version}", api_store.addons_addon_info),
                 web.post("/store/reload", api_store.reload),
                 web.get("/store/repositories", api_store.repositories_list),
                 web.get(
@@ -651,10 +777,9 @@ class RestAPI(CoreSysAttributes):
             ]
         )
 
-    def _register_panel(self) -> None:
+    def _register_panel(self) -> list[StaticResourceConfig]:
         """Register panel for Home Assistant."""
-        panel_dir = Path(__file__).parent.joinpath("panel")
-        self.webapp.add_routes([web.static("/app", panel_dir)])
+        return [StaticResourceConfig("/app", Path(__file__).parent.joinpath("panel"))]
 
     def _register_docker(self) -> None:
         """Register docker configuration functions."""

@@ -16,9 +16,6 @@ def setup(object_path: str | None = None) -> DBusServiceMock:
     return Filesystem(object_path if object_path else DEFAULT_OBJECT_PATH)
 
 
-# pylint: disable=invalid-name
-
-
 @dataclass(slots=True)
 class FilesystemFixture:
     """Filesystem fixture."""
@@ -86,7 +83,7 @@ class Filesystem(DBusServiceMock):
         """Get Size."""
         return self.fixture.Size
 
-    @dbus_method()
+    @dbus_method(track_obj_path=True)
     def SetLabel(self, label: "s", options: "a{sv}") -> None:
         """Do SetLabel method."""
 
